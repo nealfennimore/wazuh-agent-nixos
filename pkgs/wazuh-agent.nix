@@ -185,14 +185,20 @@ in
       # showing up in any Wazuh tag. A context patch against it broke on the
       # 40 to 54 move. These edits key off structure instead of line context.
       #
-      # They do three things:
+      # They do four things:
       #   - stop ExternalProject_Add from cloning libbpf, bpftool, and
       #     vmlinux.h. The derivation supplies all three.
       #   - stop the CMake download of modern.bpf.c. The derivation supplies it.
       #   - relax two errors that current clang raises and upstream does not.
+      #   - build the host-side "modern" library as gnu17. GCC 15 defaults to
+      #     gnu23, and the bpftool-generated vmlinux.h predates C23 reserving
+      #     bool, true, and false. It declares "false = 0" in an enum and
+      #     "typedef _Bool bool", both of which C23 rejects. The BPF object is
+      #     compiled by clang, which still defaults to gnu17, so only the host
+      #     target needs this.
       cmake_lists=src/external/libbpf-bootstrap/CMakeLists.txt
 
-      for anchor in 'GIT_REPOSITORY' 'PREFIX ' 'bpf_object(modern'; do
+      for anchor in 'GIT_REPOSITORY' 'PREFIX ' 'bpf_object(modern' 'add_library(modern SHARED'; do
         grep -q "$anchor" "$cmake_lists" || {
           echo "prePatch: anchor '$anchor' is gone from $cmake_lists." >&2
           echo "prePatch: libbpf-bootstrap changed shape. Rework these edits." >&2
@@ -206,7 +212,10 @@ in
         -e '/DOWNLOAD_COMMAND/d' \
         -e '/file(DOWNLOAD/d' \
         -e '/file(SIZE/d' \
+        -e '/target_compile_options(modern PRIVATE -std=gnu17)/d' \
+        -e '/^[[:space:]]*set(CMAKE_C_FLAGS.*-Wno-error=int-conversion/d' \
         -e 's|^\([[:space:]]*\)PREFIX \(.*\)$|\1PREFIX \2\n\1DOWNLOAD_COMMAND ""|' \
+        -e 's|^\([[:space:]]*\)add_library(modern SHARED\(.*\)$|\1add_library(modern SHARED\2\n\1target_compile_options(modern PRIVATE -std=gnu17)|' \
         -e 's|^\([[:space:]]*\)bpf_object(modern|\1set(CMAKE_C_FLAGS "''${CMAKE_C_FLAGS} -Wno-error=implicit-function-declaration -Wno-error=int-conversion")\n\1bpf_object(modern|' \
         "$cmake_lists"
 
@@ -220,6 +229,11 @@ in
         echo "prePatch: $cmake_lists still fetches from the network." >&2
         exit 1
       fi
+
+      grep -q 'target_compile_options(modern PRIVATE -std=gnu17)' "$cmake_lists" || {
+        echo "prePatch: the gnu17 option did not land in $cmake_lists." >&2
+        exit 1
+      }
 
       cat << EOF > "etc/preloaded-vars.conf"
       USER_LANGUAGE="en"
