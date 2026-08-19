@@ -78,6 +78,31 @@ file to force a new enrollment.
 The manager must list the agent as `Active`. Run `agent_control -l` on the
 manager to confirm this.
 
+## Enrollment fails
+
+Enrollment uses two different ports. `agent-auth` talks to `authd` on the
+registration port, 1515 by default. The daemons then send agent data to
+`remoted` on the manager port, 1514 by default.
+
+A wrong enrollment port gives this error:
+
+```
+agent-auth: ERROR: SSL error (1). Connection refused by the manager.
+SSL routines::unexpected eof while reading
+```
+
+That message means that the manager accepted the connection and then closed
+it. Confirm that `authd` runs, and that `services.wazuh-agent.registration.port`
+matches the port that `authd` listens on.
+
+To enroll again after a failure, delete the marker file and restart the unit.
+
+```bash
+sudo rm -f /var/ossec/.agent-registered /var/ossec/etc/client.keys
+sudo systemctl restart wazuh-agent-auth
+sudo systemctl restart wazuh.target
+```
+
 ## Options
 
 | Option | Default | Purpose |
@@ -87,7 +112,7 @@ manager to confirm this.
 | `manager.host` | none | The address of the Wazuh manager. Required. |
 | `manager.port` | `1514` | The agent traffic port on the manager. |
 | `registration.host` | `null` | A separate enrollment server. `null` means the manager. |
-| `registration.port` | `1515` | The enrollment port. |
+| `registration.port` | `1515` | The enrollment port. Used even when `registration.host` is `null`. |
 | `agentAuthPasswordFile` | `null` | A file that holds the enrollment password. |
 | `extraConfig` | `""` | XML appended to the generated `ossec.conf`. |
 | `config` | `null` | The complete `ossec.conf`. Replaces the generated file. |

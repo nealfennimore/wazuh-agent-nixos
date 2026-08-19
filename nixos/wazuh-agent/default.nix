@@ -127,7 +127,11 @@ in {
           };
           port = mkOption {
             type = types.port;
-            description = "The port the registration server listens on.";
+            description = ''
+              The port that authd listens on for enrollment. The agent uses
+              this port even when host is null, because enrollment never
+              goes to the manager traffic port.
+            '';
             example = 1515;
             default = 1515;
           };
@@ -236,21 +240,38 @@ in {
           };
 
           serviceConfig = let
-            useRegistration = cfg.registration.host != null;
+            # Only the host falls back to the manager. The port does not.
+            #
+            # Enrollment talks to authd, which listens on the registration
+            # port, 1515 by default. The manager port, 1514 by default,
+            # carries agent data and belongs to remoted, which speaks a
+            # different protocol. Sending agent-auth there gets the TCP
+            # connection accepted and then dropped, which surfaces as
+            # "SSL error (1) ... unexpected eof while reading" and the
+            # misleading "Connection refused by the manager".
             host =
-              if useRegistration
+              if cfg.registration.host != null
               then cfg.registration.host
               else cfg.manager.host;
-            port =
-              if useRegistration
-              then cfg.registration.port
-              else cfg.manager.port;
+
+            # Record the enrollment only when it produced a key. agent-auth
+            # can report a failure and still exit 0, and ExecStartPost runs
+            # on exit 0, so an unconditional touch marks a failed enrollment
+            # as done. ConditionPathExists then skips every later attempt.
+            markRegistered = pkgs.writeShellScript "wazuh-mark-registered" ''
+              if [ ! -s ${stateDir}/etc/client.keys ]; then
+                echo "wazuh-agent-auth: ${stateDir}/etc/client.keys is missing or empty." >&2
+                echo "wazuh-agent-auth: enrollment did not complete. Not marking it done." >&2
+                exit 1
+              fi
+              touch ${stateDir}/.agent-registered
+            '';
           in {
             Type = "oneshot";
             User = wazuhUser;
             Group = wazuhGroup;
-            ExecStart = "${pkg}/bin/agent-auth -m ${host} -p ${toString port}";
-            ExecStartPost = "${pkgs.coreutils}/bin/touch ${stateDir}/.agent-registered";
+            ExecStart = "${pkg}/bin/agent-auth -m ${host} -p ${toString cfg.registration.port}";
+            ExecStartPost = "${markRegistered}";
           };
         };
 
