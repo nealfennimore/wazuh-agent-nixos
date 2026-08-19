@@ -62,7 +62,7 @@
         pkgs = nixpkgs.legacyPackages.${system};
       in
       {
-        formatter = pkgs.alejandra;
+        formatter = pkgs.nixfmt;
         packages.wazuh-agent = pkgs.callPackage ./pkgs/wazuh-agent.nix { };
         packages.default = pkgs.callPackage ./pkgs/wazuh-agent.nix { };
 
