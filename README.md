@@ -98,6 +98,49 @@ readable. Point `agentAuthPasswordFile` at a path outside the store.
 
 `config` and `extraConfig` conflict. An assertion rejects both together.
 
+## Test in a QEMU VM
+
+The flake builds a throwaway VM with the agent enabled. The VM configuration
+is `examples/vm.nix`.
+
+1. Build and start the VM.
+
+   ```bash
+   nix build .#vm
+   ./result/bin/run-wazuh-agent-vm
+   ```
+
+2. Log in on the serial console. The user is `root` and the password is
+   `wazuh`. The console also accepts `Ctrl-a x` to quit QEMU.
+
+3. Check the units.
+
+   ```bash
+   systemctl status wazuh.target
+   journalctl -u wazuh-agent-auth -b
+   ```
+
+`nixos-rebuild build-vm --flake .#wazuh-agent-vm` builds the same VM.
+
+The VM sends agent traffic to `10.0.2.2`. That address is the host machine
+under QEMU user mode networking. Run a Wazuh manager on the host, and the
+agent reaches it with no extra network setup. The VM also forwards host port
+2222 to its own SSH port.
+
+The VM writes to a disk image named `wazuh-agent.qcow2` in the working
+directory. Delete that file to start from a clean state. This matters after
+enrollment, because the agent keeps its key in `/var/ossec`.
+
+## Run the automated test
+
+```bash
+nix build .#checks.x86_64-linux.agent
+```
+
+The test boots a VM, then confirms that activation succeeds and that the
+generated `ossec.conf` is correct. It does not confirm enrollment. Enrollment
+needs a running manager, and this repository packages only the agent.
+
 ## Build the package alone
 
 ```bash

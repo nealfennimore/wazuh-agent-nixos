@@ -29,6 +29,13 @@
       services.wazuh-agent.package =
         lib.mkDefault (pkgs.callPackage ./pkgs/wazuh-agent.nix {});
     };
+
+    # The throwaway test VM. examples/vm.nix imports qemu-vm.nix itself, so
+    # this list evaluates both as a plain NixOS system and as a VM.
+    vmModules = [
+      wazuhModule
+      ./examples/vm.nix
+    ];
   in
     {
       overlays.default = final: _prev: {
@@ -37,6 +44,12 @@
 
       nixosModules.wazuh-agent = wazuhModule;
       nixosModules.default = wazuhModule;
+
+      # For `nixos-rebuild build-vm --flake .#wazuh-agent-vm`.
+      nixosConfigurations.wazuh-agent-vm = nixpkgs.lib.nixosSystem {
+        system = "x86_64-linux";
+        modules = vmModules;
+      };
     }
     // flake-utils.lib.eachSystem supportedSystems (
       system: let
@@ -45,6 +58,25 @@
         formatter = pkgs.alejandra;
         packages.wazuh-agent = pkgs.callPackage ./pkgs/wazuh-agent.nix {};
         packages.default = pkgs.callPackage ./pkgs/wazuh-agent.nix {};
+
+        # A bootable QEMU image with the agent enabled:
+        #   nix build .#vm && ./result/bin/run-wazuh-agent-vm
+        packages.vm =
+          (nixpkgs.lib.nixosSystem {
+            inherit system;
+            modules = vmModules;
+          })
+          .config
+          .system
+          .build
+          .vm;
+
+        # A headless test of the module. It asserts activation and the
+        # generated ossec.conf. It does not assert enrollment, which needs a
+        # manager this repository does not package.
+        checks.agent = import ./nixos/tests/agent.nix {
+          inherit pkgs wazuhModule;
+        };
 
         # `.envrc` runs `use flake`. Without this shell, direnv falls back to
         # the build environment of packages.default, which pulls the whole
