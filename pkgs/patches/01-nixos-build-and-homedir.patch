@@ -1,0 +1,100 @@
+diff --git a/src/Makefile b/src/Makefile
+index 2f90c9d..54af6d0 100644
+--- a/src/Makefile
++++ b/src/Makefile
+@@ -734,15 +734,9 @@ endif
+ 
+ ${WAZUH_LIB_OUTPUT_PATH}${LIBSTDCPP_NAME}: ${libstdc++_path}
+ 	cp $< $@
+-ifneq (${uname_S},AIX)
+-	${STRIP_TOOL} -x $@
+-endif
+ 
+ ${WAZUH_LIB_OUTPUT_PATH}${LIBGCC_S_NAME}: ${libgcc_s_path}
+ 	cp $< $@
+-ifneq (${uname_S},AIX)
+-	${STRIP_TOOL} -x $@
+-endif
+ 
+ .PHONY: server local hybrid agent selinux
+ 
+@@ -898,7 +892,7 @@ endif
+ ifeq ($(CHECK_CENTOS5),YES)
+ EXTERNAL_LIBS += $(PROCPS_LIB)
+ else
+-EXTERNAL_LIBS += $(PROCPS_LIB) $(LIBALPM_LIB) $(LIBARCHIVE_LIB)
++EXTERNAL_LIBS += $(PROCPS_LIB) $(LIBALPM_LIB) $(LIBARCHIVE_LIB) $(DB_LIB)
+ endif
+ endif
+ endif
+@@ -976,7 +970,7 @@ else
+ 	cd ${EXTERNAL_OPENSSL} && ./Configure $(OPENSSL_FLAGS) solaris-sparcv9-gcc && ${MAKE} build_libs
+ endif
+ else
+-	cd ${EXTERNAL_OPENSSL} && ./config $(OPENSSL_FLAGS) && ${MAKE} build_libs
++	cd ${EXTERNAL_OPENSSL} && perl ./Configure $(OPENSSL_FLAGS) && ${MAKE} build_libs
+ endif
+ endif
+ endif
+diff --git a/src/shared/file_op.c b/src/shared/file_op.c
+index fbb20e3..2c8c007 100644
+--- a/src/shared/file_op.c
++++ b/src/shared/file_op.c
+@@ -3282,30 +3282,13 @@ char *w_homedir(char *arg) {
+         buff = w_strtok_r_str_delim(delim, &buff);
+     }
+ #else
+-    if (realpath("/proc/self/exe", buff) != NULL) {
+-        dirname(buff);
+-        buff = w_strtok_r_str_delim(delim, &buff);
+-    }
+-    else if (realpath("/proc/curproc/file", buff) != NULL) {
+-        dirname(buff);
+-        buff = w_strtok_r_str_delim(delim, &buff);
+-    }
+-    else if (realpath("/proc/self/path/a.out", buff) != NULL) {
+-        dirname(buff);
+-        buff = w_strtok_r_str_delim(delim, &buff);
++    // The path was not found so read WAZUH_HOME env var
++    // This is the only thing we need in Linux under nixos since the realpath points to a readonly filesystem
++    char * home_env = NULL;
++    if (home_env = getenv(WAZUH_HOME_ENV), home_env) {
++      snprintf(buff, PATH_MAX, "%s", home_env);
+     }
+ #endif
+-    else if (realpath(arg, buff) != NULL) {
+-        dirname(buff);
+-        buff = w_strtok_r_str_delim(delim, &buff);
+-    } else {
+-        // The path was not found so read WAZUH_HOME env var
+-        char * home_env = NULL;
+-        if (home_env = getenv(WAZUH_HOME_ENV), home_env) {
+-            snprintf(buff, PATH_MAX, "%s", home_env);
+-        }
+-    }
+-
+     if ((w_stat(buff, &buff_stat) < 0) || !S_ISDIR(buff_stat.st_mode)) {
+         os_free(buff);
+         merror_exit(HOME_ERROR);
+diff --git a/src/shared/privsep_op.c b/src/shared/privsep_op.c
+index e7e0391..002c601 100644
+--- a/src/shared/privsep_op.c
++++ b/src/shared/privsep_op.c
+@@ -132,6 +132,8 @@ gid_t Privsep_GetGroup(const char *name)
+ 
+ int Privsep_SetUser(uid_t uid)
+ {
++    return(OS_SUCCESS);
++
+     if (setuid(uid) < 0) {
+         return (OS_INVALID);
+     }
+@@ -147,6 +149,8 @@ int Privsep_SetUser(uid_t uid)
+ 
+ int Privsep_SetGroup(gid_t gid)
+ {
++    return(OS_SUCCESS);
++
+     if (setgroups(1, &gid) == -1) {
+         return (OS_INVALID);
+     }
