@@ -114,6 +114,8 @@ sudo systemctl restart wazuh.target
 | `registration.host` | `null` | A separate enrollment server. `null` means the manager. |
 | `registration.port` | `1515` | The enrollment port. Used even when `registration.host` is `null`. |
 | `agentAuthPasswordFile` | `null` | A file that holds the enrollment password. |
+| `syscheck.directories` | `[ "/etc" "/boot" ]` | Directories that file integrity monitoring watches. |
+| `syscheck.ignore` | the two systemd credential stores | Paths excluded from monitoring. |
 | `extraConfig` | `""` | XML appended to the generated `ossec.conf`. |
 | `config` | `null` | The complete `ossec.conf`. Replaces the generated file. |
 | `path` | see module | Packages on the PATH of the daemons. |
@@ -122,6 +124,30 @@ Do not put the enrollment password in the Nix store. The store is world
 readable. Point `agentAuthPasswordFile` at a path outside the store.
 
 `config` and `extraConfig` conflict. An assertion rejects both together.
+
+### File integrity monitoring on NixOS
+
+Upstream watches `/etc`, `/bin`, `/sbin`, `/usr/bin`, `/usr/sbin` and `/boot`.
+NixOS has no `/sbin` and no `/usr/sbin`, and `/bin` and `/usr/bin` hold one
+symlink each, `sh` and `env`. Four of those six entries monitor nothing, so the
+default drops them.
+
+Nothing is lost. Every binary on NixOS lives in `/nix/store` under a path that
+is a hash of its own contents, which is a stronger guarantee than a periodic
+checksum. Watch the mutable surface instead:
+
+```nix
+services.wazuh-agent.syscheck.directories = [
+  "/etc"
+  "/boot"
+  "/root"
+  "/home"
+];
+```
+
+Do not add `/nix/store`. It is immutable and large enough to make a checksum
+scan expensive for no gain. Add `/run/current-system/sw/bin` only if you want
+every system rebuild reported as several hundred changes.
 
 ## Test in a QEMU VM
 

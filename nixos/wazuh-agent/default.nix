@@ -151,6 +151,56 @@ in {
       description = "Packages to put on the PATH of the Wazuh daemons.";
     };
 
+    syscheck = mkOption {
+      description = "File integrity monitoring.";
+      default = {};
+      type = types.submodule {
+        options = {
+          directories = mkOption {
+            type = types.listOf types.str;
+            default = [
+              "/etc"
+              "/boot"
+            ];
+            example = literalExpression ''[ "/etc" "/boot" "/root" "/home" ]'';
+            description = ''
+              Directories to monitor for changes.
+
+              Upstream monitors /etc, /bin, /sbin, /usr/bin, /usr/sbin and
+              /boot. On NixOS /sbin and /usr/sbin do not exist, and /bin and
+              /usr/bin hold one symlink each, so those four entries monitor
+              nothing. The default drops them.
+
+              Do not add /nix/store. It is immutable, every path in it is named
+              by a hash of its own contents, and it is large enough to make a
+              checksum scan expensive for no gain.
+
+              Adding /run/current-system/sw/bin reports every system rebuild as
+              several hundred changes, so add it only if that is what you want.
+            '';
+          };
+
+          ignore = mkOption {
+            type = types.listOf types.str;
+            default = [
+              "/etc/credstore"
+              "/etc/credstore.encrypted"
+            ];
+            example = literalExpression ''[ "/etc/credstore" "/etc/ssh" ]'';
+            description = ''
+              Paths to exclude from monitoring, added to the list that upstream
+              already ships.
+
+              The default covers the two systemd credential directories. They
+              are mode 0700 and owned by root, the daemons run as the wazuh
+              user, so each scan of /etc would otherwise log
+              "(6922): Cannot open '/etc/credstore': Permission denied".
+            '';
+          };
+        };
+      };
+    };
+
     config = mkOption {
       type = types.nullOr types.nonEmptyStr;
       default = null;

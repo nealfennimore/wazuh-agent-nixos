@@ -58,6 +58,25 @@ pkgs.testers.runNixOSTest {
         agent.fail("grep -q '<location>/var/log/messages</location>' /var/ossec/etc/ossec.conf")
         agent.fail("grep -q '<location>/var/log/auth.log</location>' /var/ossec/etc/ossec.conf")
 
+    with subtest("syscheck watches only directories that exist on NixOS"):
+        agent.succeed("grep -q '<directories>/etc,/boot</directories>' /var/ossec/etc/ossec.conf")
+        # /sbin and /usr/sbin do not exist here, and /bin and /usr/bin hold one
+        # symlink each, so none of the four may survive.
+        agent.fail(
+            "grep -qE '<directories>[^<]*/(usr/)?s?bin' /var/ossec/etc/ossec.conf"
+        )
+        # Confirm the premise rather than trusting it.
+        agent.fail("test -e /sbin")
+        agent.fail("test -e /usr/sbin")
+
+    with subtest("the systemd credential stores are ignored"):
+        agent.succeed("grep -q '<ignore>/etc/credstore</ignore>' /var/ossec/etc/ossec.conf")
+        agent.succeed(
+            "grep -q '<ignore>/etc/credstore.encrypted</ignore>' /var/ossec/etc/ossec.conf"
+        )
+        # The upstream ignore that anchors the substitution must stay.
+        agent.succeed("grep -q '<ignore>/sys/kernel/debug</ignore>' /var/ossec/etc/ossec.conf")
+
     with subtest("the state directory belongs to the wazuh user"):
         agent.succeed("test -d /var/ossec/etc")
         agent.succeed("test $(stat -c %U /var/ossec) = wazuh")
