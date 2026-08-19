@@ -126,7 +126,6 @@ in
 
     patches = [
       ./patches/01-nixos-build-and-homedir.patch
-      ./patches/02-libbpf-bootstrap.patch
     ];
 
     # GCC 13 and later reject the incompatible pointer types in the vendored
@@ -173,6 +172,47 @@ in
 
       substituteInPlace src/external/libbpf-bootstrap/CMakeLists.txt \
         --replace-fail "/usr/bin/clang" "${clang}/bin/clang"
+
+      # This CMakeLists.txt ships in the DEPS_VERSION ${dependencyVersion}
+      # libbpf-bootstrap tarball, not in wazuh/wazuh, so it changes without
+      # showing up in any Wazuh tag. A context patch against it broke on the
+      # 40 to 54 move. These edits key off structure instead of line context.
+      #
+      # They do three things:
+      #   - stop ExternalProject_Add from cloning libbpf, bpftool, and
+      #     vmlinux.h. The derivation supplies all three.
+      #   - stop the CMake download of modern.bpf.c. The derivation supplies it.
+      #   - relax two errors that current clang raises and upstream does not.
+      cmake_lists=src/external/libbpf-bootstrap/CMakeLists.txt
+
+      for anchor in 'GIT_REPOSITORY' 'PREFIX ' 'bpf_object(modern'; do
+        grep -q "$anchor" "$cmake_lists" || {
+          echo "prePatch: anchor '$anchor' is gone from $cmake_lists." >&2
+          echo "prePatch: libbpf-bootstrap changed shape. Rework these edits." >&2
+          exit 1
+        }
+      done
+
+      sed -i \
+        -e '/GIT_REPOSITORY/d' \
+        -e '/GIT_TAG/d' \
+        -e '/DOWNLOAD_COMMAND/d' \
+        -e '/file(DOWNLOAD/d' \
+        -e '/file(SIZE/d' \
+        -e 's|^\([[:space:]]*\)PREFIX \(.*\)$|\1PREFIX \2\n\1DOWNLOAD_COMMAND ""|' \
+        -e 's|^\([[:space:]]*\)bpf_object(modern|\1set(CMAKE_C_FLAGS "''${CMAKE_C_FLAGS} -Wno-error=implicit-function-declaration -Wno-error=int-conversion")\n\1bpf_object(modern|' \
+        "$cmake_lists"
+
+      # The download is gone, so FILE_SIZE is never set and this guard would
+      # fire on an empty variable.
+      substituteInPlace "$cmake_lists" \
+        --replace-warn 'if(NOT EXISTS ''${DEST_PATH} OR FILE_SIZE EQUAL 0)' \
+                       'if(NOT EXISTS ''${DEST_PATH})'
+
+      if grep -q 'GIT_REPOSITORY\|file(DOWNLOAD' "$cmake_lists"; then
+        echo "prePatch: $cmake_lists still fetches from the network." >&2
+        exit 1
+      fi
 
       cat << EOF > "etc/preloaded-vars.conf"
       USER_LANGUAGE="en"
