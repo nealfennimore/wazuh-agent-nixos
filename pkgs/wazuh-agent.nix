@@ -21,6 +21,7 @@
   perl,
   pkg-config,
   policycoreutils,
+  procps,
   python312,
   removeReferencesTo,
   stdenv,
@@ -179,6 +180,19 @@ in
 
       substituteInPlace src/external/libbpf-bootstrap/CMakeLists.txt \
         --replace-fail "/usr/bin/clang" "${clang}/bin/clang"
+
+      # rootcheck locates ps by trying /bin/ps and then /usr/bin/ps. It never
+      # reads PATH, so services.wazuh-agent.path cannot fix this, and NixOS
+      # provides neither location. Both call sites take the same form:
+      #
+      #   strncpy(ps, "/bin/ps", OS_SIZE_1024);
+      #
+      # Without this, wazuh-syscheckd logs "rootcheck: ERROR: 'ps' not found."
+      # and every rootcheck process scan is skipped.
+      substituteInPlace \
+        src/rootcheck/unix-process.c \
+        src/rootcheck/check_rc_pids.c \
+        --replace-fail '"/bin/ps"' '"${procps}/bin/ps"'
 
       # This CMakeLists.txt ships in the DEPS_VERSION ${dependencyVersion}
       # libbpf-bootstrap tarball, not in wazuh/wazuh, so it changes without
