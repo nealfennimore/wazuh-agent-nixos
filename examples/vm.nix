@@ -13,8 +13,9 @@
   lib,
   modulesPath,
   ...
-}: {
-  imports = ["${modulesPath}/virtualisation/qemu-vm.nix"];
+}:
+{
+  imports = [ "${modulesPath}/virtualisation/qemu-vm.nix" ];
 
   services.wazuh-agent = {
     enable = true;

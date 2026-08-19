@@ -4,7 +4,8 @@
   pkgs,
   ...
 }:
-with lib; let
+with lib;
+let
   wazuhUser = "wazuh";
   wazuhGroup = wazuhUser;
   stateDir = "/var/ossec";
@@ -12,13 +13,13 @@ with lib; let
   pkg = cfg.package;
 
   generatedConfig =
-    if cfg.config != null
-    then pkgs.writeText "ossec.conf" cfg.config
-    else import ./generate-agent-config.nix {inherit cfg pkgs;};
+    if cfg.config != null then
+      pkgs.writeText "ossec.conf" cfg.config
+    else
+      import ./generate-agent-config.nix { inherit cfg pkgs; };
 
   preStart = ''
-    ${
-      concatMapStringsSep "\n"
+    ${concatMapStringsSep "\n"
       (
         dir: "[ -d ${stateDir}/${dir} ] || cp -Rv --no-preserve=ownership ${pkg}/${dir} ${stateDir}/${dir}"
       )
@@ -58,15 +59,13 @@ with lib; let
 
   mkService = d: {
     description = d;
-    wants = ["wazuh-agent-auth.service"];
+    wants = [ "wazuh-agent-auth.service" ];
 
-    partOf = ["wazuh.target"];
-    path =
-      cfg.path
-      ++ [
-        "/run/current-system/sw/bin"
-        "/run/wrappers/bin"
-      ];
+    partOf = [ "wazuh.target" ];
+    path = cfg.path ++ [
+      "/run/current-system/sw/bin"
+      "/run/wrappers/bin"
+    ];
     environment = {
       WAZUH_HOME = stateDir;
     };
@@ -76,24 +75,31 @@ with lib; let
       User = wazuhUser;
       Group = wazuhGroup;
       WorkingDirectory = "${stateDir}/";
-      CapabilityBoundingSet = ["CAP_SETGID"];
+      CapabilityBoundingSet = [ "CAP_SETGID" ];
 
       ExecStart =
-        if d != "wazuh-modulesd"
-        then "/run/wrappers/bin/${d} -f -c ${stateDir}/etc/ossec.conf"
-        else "/run/wrappers/bin/${d} -f";
+        if d != "wazuh-modulesd" then
+          "/run/wrappers/bin/${d} -f -c ${stateDir}/etc/ossec.conf"
+        else
+          "/run/wrappers/bin/${d} -f";
     };
   };
-in {
+in
+{
   options.services.wazuh-agent = {
     enable = mkEnableOption "Wazuh agent";
 
-    package = mkPackageOption pkgs "wazuh-agent" {};
+    package = mkPackageOption pkgs "wazuh-agent" { };
 
     manager = mkOption {
       description = "The Wazuh manager this agent reports to.";
       type = types.submodule {
-        freeformType = with types; attrsOf (oneOf [nonEmptyStr port]);
+        freeformType =
+          with types;
+          attrsOf (oneOf [
+            nonEmptyStr
+            port
+          ]);
         options = {
           host = mkOption {
             type = types.nonEmptyStr;
@@ -115,9 +121,14 @@ in {
         The enrollment server. When host is null, the agent enrolls against
         the manager instead.
       '';
-      default = {};
+      default = { };
       type = types.submodule {
-        freeformType = with types; attrsOf (oneOf [nonEmptyStr port]);
+        freeformType =
+          with types;
+          attrsOf (oneOf [
+            nonEmptyStr
+            port
+          ]);
         options = {
           host = mkOption {
             type = types.nullOr types.nonEmptyStr;
@@ -153,7 +164,7 @@ in {
 
     syscheck = mkOption {
       description = "File integrity monitoring.";
-      default = {};
+      default = { };
       type = types.submodule {
         options = {
           directories = mkOption {
@@ -256,40 +267,39 @@ in {
       ];
     };
 
-    users.groups.${wazuhGroup} = {};
+    users.groups.${wazuhGroup} = { };
 
     systemd.tmpfiles.rules = [
       "d ${stateDir} 0750 ${wazuhUser} ${wazuhGroup} -"
       "d ${stateDir}/tmp 0750 ${wazuhUser} ${wazuhGroup} 1d"
     ];
 
-    systemd.targets.multi-user.wants = ["wazuh.target"];
+    systemd.targets.multi-user.wants = [ "wazuh.target" ];
     systemd.targets.wazuh.wants = map (d: "${d}.service") daemons;
 
-    systemd.services =
-      listToAttrs (map (d: nameValuePair d (mkService d)) daemons)
-      // {
-        wazuh-agent-auth = {
-          description = "Enroll the Wazuh agent with its manager";
-          after = [
-            "setup-pre-wazuh.service"
-            "network.target"
-            "network-online.target"
-          ];
-          wants = [
-            "setup-pre-wazuh.service"
-            "network-online.target"
-          ];
-          before = map (d: "${d}.service") daemons;
-          environment = {
-            WAZUH_HOME = stateDir;
-          };
+    systemd.services = listToAttrs (map (d: nameValuePair d (mkService d)) daemons) // {
+      wazuh-agent-auth = {
+        description = "Enroll the Wazuh agent with its manager";
+        after = [
+          "setup-pre-wazuh.service"
+          "network.target"
+          "network-online.target"
+        ];
+        wants = [
+          "setup-pre-wazuh.service"
+          "network-online.target"
+        ];
+        before = map (d: "${d}.service") daemons;
+        environment = {
+          WAZUH_HOME = stateDir;
+        };
 
-          unitConfig = {
-            ConditionPathExists = "!${stateDir}/.agent-registered";
-          };
+        unitConfig = {
+          ConditionPathExists = "!${stateDir}/.agent-registered";
+        };
 
-          serviceConfig = let
+        serviceConfig =
+          let
             # Only the host falls back to the manager. The port does not.
             #
             # Enrollment talks to authd, which listens on the registration
@@ -299,10 +309,7 @@ in {
             # connection accepted and then dropped, which surfaces as
             # "SSL error (1) ... unexpected eof while reading" and the
             # misleading "Connection refused by the manager".
-            host =
-              if cfg.registration.host != null
-              then cfg.registration.host
-              else cfg.manager.host;
+            host = if cfg.registration.host != null then cfg.registration.host else cfg.manager.host;
 
             # Record the enrollment only when it produced a key. agent-auth
             # can report a failure and still exit 0, and ExecStartPost runs
@@ -316,33 +323,39 @@ in {
               fi
               touch ${stateDir}/.agent-registered
             '';
-          in {
+          in
+          {
             Type = "oneshot";
             User = wazuhUser;
             Group = wazuhGroup;
             ExecStart = "${pkg}/bin/agent-auth -m ${host} -p ${toString cfg.registration.port}";
             ExecStartPost = "${markRegistered}";
           };
-        };
+      };
 
-        setup-pre-wazuh = {
-          description = "Set up the Wazuh agent directory structure";
-          wantedBy = ["wazuh-agent-auth.service"];
-          before = ["wazuh-agent-auth.service"];
-          serviceConfig = {
-            Type = "oneshot";
-            User = wazuhUser;
-            Group = wazuhGroup;
-            ExecStart = let
+      setup-pre-wazuh = {
+        description = "Set up the Wazuh agent directory structure";
+        wantedBy = [ "wazuh-agent-auth.service" ];
+        before = [ "wazuh-agent-auth.service" ];
+        serviceConfig = {
+          Type = "oneshot";
+          User = wazuhUser;
+          Group = wazuhGroup;
+          ExecStart =
+            let
               script = pkgs.writeShellApplication {
                 name = "wazuh-prestart";
-                runtimeInputs = [pkgs.coreutils pkgs.findutils];
+                runtimeInputs = [
+                  pkgs.coreutils
+                  pkgs.findutils
+                ];
                 text = preStart;
               };
-            in "${script}/bin/wazuh-prestart";
-          };
+            in
+            "${script}/bin/wazuh-prestart";
         };
       };
+    };
 
     # TODO: narrow this. The daemons already run as the wazuh user, so setuid
     # and setgid to that same user buys little. Confirm against a running agent
@@ -350,15 +363,14 @@ in {
     security.wrappers = listToAttrs (
       map (
         d:
-          nameValuePair d {
-            setgid = true;
-            setuid = true;
-            owner = wazuhUser;
-            group = wazuhGroup;
-            source = "${pkg}/bin/${d}";
-          }
-      )
-      daemons
+        nameValuePair d {
+          setgid = true;
+          setuid = true;
+          owner = wazuhUser;
+          group = wazuhGroup;
+          source = "${pkg}/bin/${d}";
+        }
+      ) daemons
     );
   };
 }

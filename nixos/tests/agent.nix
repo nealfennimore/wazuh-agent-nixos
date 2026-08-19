@@ -15,7 +15,7 @@ pkgs.testers.runNixOSTest {
   name = "wazuh-agent";
 
   nodes.agent = {
-    imports = [wazuhModule];
+    imports = [ wazuhModule ];
 
     services.wazuh-agent = {
       enable = true;

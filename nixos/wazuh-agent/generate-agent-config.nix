@@ -8,7 +8,8 @@
 {
   cfg,
   pkgs,
-}: let
+}:
+let
   inherit (pkgs) lib;
 
   # Every pattern below starts at column 0. A Nix indented string strips the
@@ -26,26 +27,26 @@
   # is not a combination Wazuh accepts. Replace the three file readers as one
   # block instead, and leave the active response reader alone.
   syslogFileReaders = ''
-<localfile>
-    <log_format>syslog</log_format>
-    <location>/var/log/messages</location>
-  </localfile>
+    <localfile>
+        <log_format>syslog</log_format>
+        <location>/var/log/messages</location>
+      </localfile>
 
-  <localfile>
-    <log_format>syslog</log_format>
-    <location>/var/log/auth.log</location>
-  </localfile>
+      <localfile>
+        <log_format>syslog</log_format>
+        <location>/var/log/auth.log</location>
+      </localfile>
 
-  <localfile>
-    <log_format>syslog</log_format>
-    <location>/var/log/syslog</location>
-  </localfile>'';
+      <localfile>
+        <log_format>syslog</log_format>
+        <location>/var/log/syslog</location>
+      </localfile>'';
 
   journaldReader = ''
-<localfile>
-    <log_format>journald</log_format>
-    <location>journald</location>
-  </localfile>'';
+    <localfile>
+        <log_format>journald</log_format>
+        <location>journald</location>
+      </localfile>'';
 
   # Upstream watches the FHS binary directories. On NixOS /sbin and /usr/sbin
   # do not exist at all, and /bin and /usr/bin hold one symlink each, sh and
@@ -57,34 +58,37 @@
   # a stronger guarantee than a periodic checksum. What is worth watching is the
   # mutable surface, which syscheck.directories names.
   upstreamDirectories = ''
-<directories>/etc,/usr/bin,/usr/sbin</directories>
-    <directories>/bin,/sbin,/boot</directories>'';
+    <directories>/etc,/usr/bin,/usr/sbin</directories>
+        <directories>/bin,/sbin,/boot</directories>'';
 
   directoriesLine =
-    if cfg.syscheck.directories == []
-    then "<!-- services.wazuh-agent.syscheck.directories is empty -->"
-    else "<directories>${lib.concatStringsSep "," cfg.syscheck.directories}</directories>";
+    if cfg.syscheck.directories == [ ] then
+      "<!-- services.wazuh-agent.syscheck.directories is empty -->"
+    else
+      "<directories>${lib.concatStringsSep "," cfg.syscheck.directories}</directories>";
 
   # systemd creates /etc/credstore and /etc/credstore.encrypted as 0700 root,
   # and the daemons run as the wazuh user, so every scan of /etc logs
   # "(6922): Cannot open '/etc/credstore': Permission denied". The agent cannot
   # read them and never will, so ignore them instead of logging twice a day.
   lastUpstreamIgnore = "<ignore>/sys/kernel/debug</ignore>";
-  ignoreLines =
-    lib.concatStringsSep "\n    "
-    ([lastUpstreamIgnore] ++ map (p: "<ignore>${p}</ignore>") cfg.syscheck.ignore);
+  ignoreLines = lib.concatStringsSep "\n    " (
+    [ lastUpstreamIgnore ] ++ map (p: "<ignore>${p}</ignore>") cfg.syscheck.ignore
+  );
 
   # The template gives <server> an address and no port.
   serverAddress = "<address>IP</address>";
   serverAddressAndPort = ''
-<address>${cfg.manager.host}</address>
-      <port>${toString cfg.manager.port}</port>'';
+    <address>${cfg.manager.host}</address>
+          <port>${toString cfg.manager.port}</port>'';
 in
-  pkgs.runCommand "ossec.conf" {
+pkgs.runCommand "ossec.conf"
+  {
     inherit (cfg) extraConfig;
-    passAsFile = ["extraConfig"];
+    passAsFile = [ "extraConfig" ];
     template = "${cfg.package}/share/wazuh-agent/ossec-agent.conf";
-  } ''
+  }
+  ''
     substitute "$template" ossec.conf \
       --replace-fail ${lib.escapeShellArg serverAddress} \
                      ${lib.escapeShellArg serverAddressAndPort} \

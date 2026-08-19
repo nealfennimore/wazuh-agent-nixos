@@ -2,7 +2,7 @@
 #
 # Copy the services.wazuh-agent block into a host configuration. Import the
 # module first. See examples/flake.nix for a complete flake.
-{...}: {
+{ ... }: {
   services.wazuh-agent = {
     enable = true;
 
