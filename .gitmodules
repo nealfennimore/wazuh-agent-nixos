@@ -1,0 +1,4 @@
+[submodule "modules/wazuh"]
+	path = modules/wazuh
+	url = git@github.com:wazuh/wazuh.git
+	branch = main
