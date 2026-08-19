@@ -21,7 +21,7 @@ The NixOS module supplies its own package. The overlay is optional.
 1. Add the flake as an input.
 
    ```nix
-   inputs.wazuh-agent.url = "git+https://buzz.54rockybrook.house/git/ca2d2718d08212aa374355554aad2d2396c6531970fefebde668adce12889664/wazuh-agent.git";
+   inputs.wazuh-agent.url = "git+https://github.com/nealfennimore/wazuh-agent-nixos";
    ```
 
 2. Import the module and set the manager address.
@@ -45,6 +45,38 @@ The NixOS module supplies its own package. The overlay is optional.
 
 The agent enrolls once, then writes `/var/ossec/.agent-registered`. Delete that
 file to force a new enrollment.
+
+`examples/` holds a complete flake and a commented host configuration.
+
+## Verify the service
+
+1. Confirm that the five daemons are active.
+
+   ```bash
+   systemctl status wazuh.target wazuh-agentd wazuh-logcollector \
+     wazuh-syscheckd wazuh-modulesd wazuh-execd
+   ```
+
+2. Read the enrollment result.
+
+   ```bash
+   journalctl -u wazuh-agent-auth -b
+   ```
+
+3. Confirm that the generated configuration reached the state directory.
+
+   ```bash
+   grep -A2 '<server>' /var/ossec/etc/ossec.conf
+   ```
+
+4. Read the agent log.
+
+   ```bash
+   tail -n 50 /var/ossec/logs/ossec.log
+   ```
+
+The manager must list the agent as `Active`. Run `agent_control -l` on the
+manager to confirm this.
 
 ## Options
 
