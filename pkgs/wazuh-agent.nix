@@ -5,6 +5,7 @@
   cmake,
   curl,
   elfutils,
+  expat,
   fetchFromGitHub,
   fetchurl,
   lib,
@@ -100,6 +101,10 @@ in
       clang
       cmake
       curl
+      # src/external/audit-userspace/autogen.sh runs autoreconf, and that tree
+      # declares LT_INIT, so libtoolize must be on PATH. buildInputs does not
+      # put a package on PATH, so libtool belongs here.
+      libtool
       perl
       pkg-config
       policycoreutils
@@ -109,11 +114,13 @@ in
 
     buildInputs = [
       elfutils
+      # The vendored dbus configure calls PKG_CHECK_MODULES([EXPAT], [expat]).
+      # DEPS_VERSION 54 added dbus to the agent dependency set, so this is new.
+      expat
       libbfd
       libbpf
       libcap
       libelf
-      libtool
       llvm
       openssl
     ];
