@@ -217,9 +217,19 @@ let
     wants = [ "wazuh-agent-auth.service" ];
 
     partOf = [ "wazuh.target" ];
+    # Every entry here goes through lib.makeBinPath, which appends /bin, and
+    # through makeSearchPathOutput, which appends /sbin. So an entry must name
+    # the prefix, not the bin directory.
+    #
+    # The previous version named "/run/current-system/sw/bin" and produced
+    # "/run/current-system/sw/bin/bin", which does not exist. The system path
+    # was therefore absent from the daemon PATH, and nothing said so. What hid
+    # it is that NixOS adds coreutils, findutils, gnugrep, gnused and systemd
+    # to every service path by default, so the commands the agent runs kept
+    # resolving.
     path = cfg.path ++ [
-      "/run/current-system/sw/bin"
-      "/run/wrappers/bin"
+      "/run/current-system/sw"
+      "/run/wrappers"
     ];
     environment = {
       WAZUH_HOME = stateDir;

@@ -223,17 +223,25 @@ pkgs.testers.runNixOSTest {
         # logcollector.state_interval is 60, so the file is rewritten once a
         # minute and the first write lands a minute after the daemon starts.
         state = "/var/ossec/var/run/wazuh-logcollector.state"
+
+        # Sum into a list and default to 0, so that jq prints a number even
+        # before the journald record exists. Reading .events directly prints
+        # nothing at that point, and `test "" -gt 0` is an error rather than a
+        # retry, which buries the real wait in log noise.
         events = (
-            """jq '.global.files[] | select(.location == "journald") | .events' """
+            """jq '[.global.files[] | select(.location == "journald")"""
+            """ | .events] | add // 0' """
             + state
         )
-        agent.wait_until_succeeds(f'test "$({events})" -gt 0', timeout=240)
+        agent.wait_until_succeeds(
+            f'test -f {state} && test "$({events})" -gt 0', timeout=240
+        )
 
         # A target that accepts nothing would still count reads above. drops
         # is the queue rejecting them.
         drops = (
             """jq '[.global.files[] | select(.location == "journald")"""
-            """ | .targets[].drops] | add' """
+            """ | .targets[].drops] | add // 0' """
             + state
         )
         agent.succeed(f'test "$({drops})" -eq 0')
@@ -260,6 +268,15 @@ pkgs.testers.runNixOSTest {
                 daemon_path = entry[len("PATH="):]
         assert daemon_path, f"wazuh-logcollector has no PATH: {env!r}"
 
+        # services.wazuh-agent.path goes through lib.makeBinPath, which appends
+        # /bin to every entry. An entry that already ends in /bin lands as
+        # .../bin/bin, a directory that does not exist, and the entry it was
+        # meant to add is silently missing.
+        entries = daemon_path.split(":")
+        doubled = [p for p in entries if p.endswith("/bin/bin")]
+        assert not doubled, f"path entries end in /bin/bin: {doubled}"
+        assert "/run/current-system/sw/bin" in entries, daemon_path
+
         readers = agent.succeed(
             r"sed -n 's|.*<command>\(.*\)</command>.*|\1|p' /var/ossec/etc/ossec.conf"
         )
@@ -273,9 +290,12 @@ pkgs.testers.runNixOSTest {
                     binaries.add(words[0])
         assert binaries, "the generated ossec.conf has no command reader"
 
+        # /bin/sh by absolute path, because that is what popen execs. The
+        # daemon PATH has no shell on it and does not need one.
         for binary in sorted(binaries):
             agent.succeed(
-                f"env -i PATH={daemon_path} sh -c 'command -v {binary}' >/dev/null"
+                f"env -i PATH={daemon_path} /bin/sh -c 'command -v {binary}'"
+                " >/dev/null"
             )
 
     with subtest("the wazuh user can read the login records"):

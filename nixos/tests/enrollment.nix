@@ -22,17 +22,26 @@ pkgs.testers.runNixOSTest {
     imports = [ ./manager-node.nix ];
   };
 
-  nodes.agent = {
-    imports = [ wazuhModule ];
+  nodes.agent =
+    { nodes, ... }:
+    {
+      imports = [ wazuhModule ];
 
-    services.wazuh-agent = {
-      enable = true;
-      # runNixOSTest writes an /etc/hosts entry for every node name.
-      manager.host = "manager";
-      manager.port = 1514;
-      registration.port = 1515;
+      services.wazuh-agent = {
+        enable = true;
+
+        # The address, not the node name. runNixOSTest writes both an A and an
+        # AAAA record for every node into /etc/hosts, and the agent resolved
+        # "manager" to 2001:db8:1::2 and failed with
+        # "(1208): Unable to connect to enrollment service".
+        #
+        # The manager listens on IPv4. Wazuh binds IPv6 only when the
+        # configuration asks for it, and the image's does not.
+        manager.host = nodes.manager.networking.primaryIPAddress;
+        manager.port = 1514;
+        registration.port = 1515;
+      };
     };
-  };
 
   testScript = ''
     start_all()
