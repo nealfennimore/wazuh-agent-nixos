@@ -179,18 +179,47 @@ stdenv.mkDerivation {
     substituteInPlace src/external/libbpf-bootstrap/CMakeLists.txt \
       --replace-fail "/usr/bin/clang" "${clang}/bin/clang"
 
-    # rootcheck locates ps by trying /bin/ps and then /usr/bin/ps. It never
-    # reads PATH, so services.wazuh-agent.path cannot fix this, and NixOS
-    # provides neither location. Both call sites take the same form:
+    # Wazuh locates ps by trying /bin/ps and then /usr/bin/ps. It never reads
+    # PATH, so services.wazuh-agent.path cannot fix this, and NixOS provides
+    # neither location. Every call site takes the same form:
     #
     #   strncpy(ps, "/bin/ps", OS_SIZE_1024);
+    #   if (!is_file(ps)) {
+    #       strncpy(ps, "/usr/bin/ps", OS_SIZE_1024);
     #
-    # Without this, wazuh-syscheckd logs "rootcheck: ERROR: 'ps' not found."
-    # and every rootcheck process scan is skipped.
+    # There are three, in two subsystems, and they surface differently:
+    #
+    #   src/rootcheck/unix-process.c   "rootcheck: ERROR: 'ps' not found."
+    #   src/rootcheck/check_rc_pids.c  from wazuh-syscheckd
+    #   src/shared/os_utils.c          "wazuh-remoted: ERROR: 'ps' not found."
+    #                                  from wazuh-modulesd, through SCA
+    #
+    # The third appears only once a policy with a process rule runs, and it
+    # carries a tag that names a daemon an agent does not even have.
+    #
+    # Both branches are rewritten, not only the first. A remaining
+    # /usr/bin/ps would be a second dead path, and it would defeat the check
+    # below.
     substituteInPlace \
       src/rootcheck/unix-process.c \
       src/rootcheck/check_rc_pids.c \
-      --replace-fail '"/bin/ps"' '"${procps}/bin/ps"'
+      src/shared/os_utils.c \
+      --replace-fail '"/bin/ps"' '"${procps}/bin/ps"' \
+      --replace-fail '"/usr/bin/ps"' '"${procps}/bin/ps"'
+
+    # No hardcoded ps lookup may remain in Wazuh's own code. The first fix
+    # covered src/rootcheck and shipped, then shared/os_utils.c turned up from
+    # a running agent. Fail the build rather than find the next one in a log.
+    # src/external is vendored, and it holds procps itself, so it is out of
+    # scope here.
+    if grep -rn --include='*.c' --include='*.h' \
+         -e '"/bin/ps"' -e '"/usr/bin/ps"' src | grep -v '^src/external/'; then
+      echo "prePatch: a hardcoded ps lookup remains, listed above." >&2
+      echo "prePatch: NixOS has neither /bin/ps nor /usr/bin/ps, so that call" >&2
+      echo "prePatch: site fails at runtime. Add the file to the" >&2
+      echo "prePatch: substituteInPlace above." >&2
+      exit 1
+    fi
 
     # This CMakeLists.txt ships in the DEPS_VERSION ${dependencyVersion}
     # libbpf-bootstrap tarball, not in wazuh/wazuh, so it changes without
