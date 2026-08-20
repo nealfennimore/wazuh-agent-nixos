@@ -257,10 +257,15 @@ let
   # lookup, and a miss is written to logs/active-responses.log rather than to
   # the journal. So a response that is selected without its binary fails in a
   # place the agent's own log never shows.
+  # This table is the single source for both the options below and the grants
+  # they produce. Adding a response here adds
+  # services.wazuh-agent.activeResponse.capability.<name>.enable with it.
   responseRequirements = {
     # Adds INPUT and FORWARD DROP rules. iptables supplies ip6tables too.
     # firewalls/default-firewall-drop.c:89
     firewall-drop = {
+      default = true;
+      description = "Add the offending address to the iptables DROP list.";
       packages = [ pkgs.iptables ];
       capabilities = [ "CAP_NET_ADMIN" ];
       readWritePaths = [ ];
@@ -270,6 +275,8 @@ let
     # Adds a reject route. Note that it resolves "route" and not "ip"
     # (route-null.c:67), so nettools in the path default already covers it.
     route-null = {
+      default = true;
+      description = "Route the offending address to nowhere.";
       packages = [ pkgs.nettools ];
       capabilities = [ "CAP_NET_ADMIN" ];
       readWritePaths = [ ];
@@ -279,6 +286,11 @@ let
     # Posts to a webhook. No capability at all, only a binary.
     # wazuh-slack.c:79,105
     wazuh-slack = {
+      default = true;
+      description = ''
+        Post a notification to a Slack webhook. This one needs no capability,
+        only curl. The webhook URL comes from the manager as extra_args.
+      '';
       packages = [ pkgs.curl ];
       capabilities = [ ];
       readWritePaths = [ ];
@@ -290,10 +302,20 @@ let
     # ProtectSystem = "strict" makes /etc read-only, and the file is root
     # owned. So punch a hole for that one path and create the file owned by
     # the wazuh user. The leading - tolerates its absence at unit start.
-    #
-    # Little reads /etc/hosts.deny on a modern NixOS host. Select this only if
-    # something on yours does.
     host-deny = {
+      default = false;
+      description = ''
+        Append the offending address to /etc/hosts.deny.
+
+        Off by default, because the grant is a different shape from the
+        others. The path is hardcoded, ProtectSystem = "strict" makes /etc
+        read-only, and the file is normally owned by root. Enabling this adds
+        /etc/hosts.deny to ReadWritePaths for wazuh-execd alone and creates
+        the file owned by the wazuh user. Neither of those is a capability.
+
+        Little reads /etc/hosts.deny on a modern NixOS host. Enable this only
+        if something on yours does.
+      '';
       packages = [ ];
       capabilities = [ ];
       readWritePaths = [ "-/etc/hosts.deny" ];
@@ -316,10 +338,12 @@ let
   #                    outside the supervision systemd already provides.
   #   ipfw, npf, pf    BSD firewalls.
 
-  # Guarded on enable, so that a stale responses list grants nothing and
-  # creates nothing while active response is off.
+  # Guarded on enable, so that capability settings left behind grant nothing
+  # and create nothing while active response is off.
   selectedResponses = optionals cfg.activeResponse.enable (
-    map (r: responseRequirements.${r}) cfg.activeResponse.responses
+    attrValues (
+      filterAttrs (name: _: cfg.activeResponse.capability.${name}.enable) responseRequirements
+    )
   );
   gather = attr: unique (concatMap (r: r.${attr}) selectedResponses);
 
@@ -647,46 +671,44 @@ in
             description = "Whether the agent may act on a finding.";
           };
 
-          responses = mkOption {
-            type = types.listOf (
-              types.enum [
-                "firewall-drop"
-                "route-null"
-                "wazuh-slack"
-                "host-deny"
-              ]
-            );
-            default = [
-              "firewall-drop"
-              "route-null"
-              "wazuh-slack"
-            ];
-            example = [
-              "firewall-drop"
-              "host-deny"
-            ];
+          capability = mkOption {
+            default = { };
+            example = {
+              route-null.enable = false;
+              host-deny.enable = true;
+            };
             description = ''
-              Which active responses this host is prepared to run. Each entry
-              adds only what that response needs, so a shorter list is a
-              smaller grant.
+              Which active responses this host is prepared to run. Each one
+              adds only what that response needs, so turning one off makes the
+              grant smaller. Turn off firewall-drop and route-null and no unit
+              in this module holds a capability at all.
 
               This does not restrict the manager. Every script the package
               ships stays in active-response/bin, and the manager decides
-              which to invoke. What this list controls is whether the binary
-              and the privilege that script needs are present. A response the
-              manager sends that is not listed here fails, and the failure is
-              written to logs/active-responses.log rather than to the journal.
-
-              The default is the three that need nothing beyond CAP_NET_ADMIN
-              and a binary. host-deny is not in it: it needs /etc/hosts.deny
-              made writable by the wazuh user, and little reads that file on a
-              modern NixOS host.
+              which to invoke. What these options control is whether the
+              binary and the privilege that script needs are present. A
+              response the manager sends that is disabled here fails, and the
+              failure is written to logs/active-responses.log rather than to
+              the journal, so the manager sees it and the agent's own log does
+              not.
 
               disable-account, firewalld-drop, restart-wazuh and the BSD
-              firewall scripts are not offered. See the comment above
-              responseRequirements in this file for why each one cannot be
-              reached from a sandboxed unit.
+              firewall scripts have no option here. None of them is blocked by
+              a missing capability. See the comment above
+              responseRequirements in this file for the reason in each case.
             '';
+            type = types.submodule {
+              # Generated from responseRequirements, so a response cannot be
+              # offered as an option without also declaring what it needs.
+              options = mapAttrs (
+                _: req: {
+                  enable = mkOption {
+                    type = types.bool;
+                    inherit (req) default description;
+                  };
+                }
+              ) responseRequirements;
+            };
           };
         };
       };

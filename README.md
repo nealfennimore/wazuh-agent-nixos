@@ -124,7 +124,7 @@ sudo systemctl restart wazuh.target
 | `sca.interval` | `"12h"` | Time between scans. |
 | `sca.skipNfs` | `true` | Skips NFS mounts during a scan. |
 | `activeResponse.enable` | `false` | Lets the agent act on a finding, not only report it. |
-| `activeResponse.responses` | firewall-drop, route-null, wazuh-slack | Which responses this host is prepared to run. |
+| `activeResponse.capability.<name>.enable` | see below | Whether that response is provisioned. |
 | `extraConfig` | `""` | XML appended to the generated `ossec.conf`. |
 | `config` | `null` | The complete `ossec.conf`. Replaces the generated file. |
 | `path` | see module | Packages on the PATH of the daemons. |
@@ -178,38 +178,38 @@ inactive forever.
 services.wazuh-agent.activeResponse.enable = true;
 ```
 
-Each response is granted what it needs, and nothing more. `responses` selects
-which ones this host is prepared to run.
+Each response is granted what it needs, and nothing more.
 
 ```nix
 services.wazuh-agent.activeResponse = {
   enable = true;
-  responses = [ "firewall-drop" "host-deny" ];
+  capability.host-deny.enable = true;
+  capability.route-null.enable = false;
 };
 ```
 
-| Response | Needs | In the default list |
-|----------|-------|---------------------|
-| `firewall-drop` | `iptables` and `ip6tables`, `CAP_NET_ADMIN` | yes |
-| `route-null` | `route` from `nettools`, `CAP_NET_ADMIN` | yes |
-| `wazuh-slack` | `curl`, no capability | yes |
-| `host-deny` | `/etc/hosts.deny` writable by the `wazuh` user | no |
+| Response | Needs | Default |
+|----------|-------|---------|
+| `firewall-drop` | `iptables` and `ip6tables`, `CAP_NET_ADMIN` | on |
+| `route-null` | `route` from `nettools`, `CAP_NET_ADMIN` | on |
+| `wazuh-slack` | `curl`, no capability | on |
+| `host-deny` | `/etc/hosts.deny` writable by the `wazuh` user | off |
 
-`host-deny` is out of the default list because the grant is a different shape.
-The path is hardcoded, `ProtectSystem = "strict"` makes `/etc` read-only, and
-the file is normally owned by root. Selecting it adds `/etc/hosts.deny` to
+`host-deny` is off by default because the grant is a different shape. The path
+is hardcoded, `ProtectSystem = "strict"` makes `/etc` read-only, and the file
+is normally owned by root. Enabling it adds `/etc/hosts.deny` to
 `ReadWritePaths` for `wazuh-execd` alone and creates the file owned by the
-`wazuh` user. Little reads that file on a modern NixOS host, so select it only
+`wazuh` user. Little reads that file on a modern NixOS host, so enable it only
 if something on yours does.
 
 `CAP_NET_ADMIN` is the only capability any unit in this module holds, and only
-`wazuh-execd` holds it. Drop `firewall-drop` and `route-null` from the list and
-no unit holds a capability at all.
+`wazuh-execd` holds it. Turn off `firewall-drop` and `route-null` and no unit
+holds a capability at all.
 
-**This list does not restrict the manager.** Every script the package ships
-stays in `active-response/bin`, and the manager decides which to invoke. The
-list controls whether the binary and the privilege that script needs are
-present. A response the manager sends that is not listed fails.
+**These options do not restrict the manager.** Every script the package ships
+stays in `active-response/bin`, and the manager decides which to invoke. They
+control whether the binary and the privilege that script needs are present. A
+response the manager sends that is disabled here fails.
 
 Each script resolves its binary with a `PATH` lookup, and a miss is written to
 `logs/active-responses.log` rather than to the journal. `logcollector` reads
@@ -449,7 +449,7 @@ systemd.services.wazuh-syscheckd.serviceConfig.ProtectHome = false;
 - File integrity monitoring runs in scheduled mode. `whodata` mode loads an
   eBPF object, and `bpf` is in `@privileged` rather than `@system-service`, so
   it needs a `SystemCallFilter` exception that this module does not add.
-- `activeResponse.responses` offers four of the scripts the package ships.
+- `activeResponse.capability` offers four of the scripts the package ships.
   `disable-account`, `firewalld-drop` and `restart-wazuh` are not among them,
   and none of the three is blocked by a missing capability. See the active
   response section for each reason.

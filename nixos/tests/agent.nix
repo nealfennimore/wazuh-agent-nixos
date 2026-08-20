@@ -58,14 +58,9 @@ pkgs.testers.runNixOSTest {
         manager.host = "192.0.2.10";
         manager.port = 1514;
         activeResponse.enable = true;
-        # host-deny is not in the default list. Select it here so the run
-        # covers the one response that needs a path rather than a capability.
-        activeResponse.responses = [
-          "firewall-drop"
-          "route-null"
-          "wazuh-slack"
-          "host-deny"
-        ];
+        # host-deny is off by default. Turn it on here so the run covers the
+        # one response that needs a path rather than a capability.
+        activeResponse.capability.host-deny.enable = true;
 
         # Contents do not matter here. Nothing reads them without a manager,
         # and what this node checks is that the paths reach both enrollment
@@ -73,6 +68,26 @@ pkgs.testers.runNixOSTest {
         registration.caFile = pkgs.writeText "test-root-ca.pem" "";
         registration.certFile = pkgs.writeText "test-agent.pem" "";
         registration.keyFile = pkgs.writeText "test-agent-key.pem" "";
+      };
+    };
+
+  # Active response on, but only the response that needs no capability. This
+  # is the claim the per-response grant makes: turn the network ones off and
+  # no unit in the module holds a capability, while execd still runs.
+  nodes.notifier =
+    { ... }:
+    {
+      imports = [ wazuhModule ];
+
+      services.wazuh-agent = {
+        enable = true;
+        manager.host = "192.0.2.10";
+        activeResponse.enable = true;
+        activeResponse.capability = {
+          firewall-drop.enable = false;
+          route-null.enable = false;
+          wazuh-slack.enable = true;
+        };
       };
     };
 
@@ -423,8 +438,36 @@ pkgs.testers.runNixOSTest {
         responder.succeed("test $(stat -c %U /etc/hosts.deny) = wazuh")
         responder.succeed("runuser -u wazuh -- test -w /etc/hosts.deny")
 
-        # Not selected on the default node, so nothing there was widened.
+        # Not enabled on the default node, so nothing there was widened.
         agent.fail("test -e /etc/hosts.deny")
+
+    with subtest("a response that needs no capability grants none"):
+        # execd still runs, because active response is on. It holds nothing,
+        # because the only response enabled is the one that needs a binary
+        # and not a privilege. This is what makes the grant subtractive
+        # rather than all-or-nothing.
+        notifier.wait_for_file("/var/ossec/etc/ossec.conf", timeout=120)
+        notifier.succeed("systemctl cat wazuh-execd.service >/dev/null")
+
+        for prop in ["CapabilityBoundingSet", "AmbientCapabilities"]:
+            got = notifier.succeed(
+                f"systemctl show -p {prop} --value wazuh-execd.service"
+            ).strip()
+            assert got == "", f"execd holds {got!r} with only wazuh-slack on"
+
+        # And it did not lose what it does need.
+        env = notifier.succeed(
+            "systemctl show -p Environment --value wazuh-execd.service"
+        ).strip()
+        notifier_path = None
+        for entry in env.split():
+            if entry.startswith("PATH="):
+                notifier_path = entry[len("PATH="):]
+        assert notifier_path, f"wazuh-execd has no PATH: {env!r}"
+        notifier.succeed(
+            f"env -i PATH={notifier_path} /bin/sh -c 'command -v curl' >/dev/null"
+        )
+        notifier.fail("test -e /etc/hosts.deny")
 
     with subtest("enrollment is unverified unless a CA is configured"):
         # Off by default, and the absence must be an absent block rather than
