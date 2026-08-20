@@ -33,6 +33,16 @@ let
     "wodles"
   ];
 
+  # Also owned by the package, but not every build produces them.
+  #
+  # ruleset holds the SCA policies. install.sh creates ruleset/sca in
+  # InstallCommon, then fills it only when it recognizes the distribution, and
+  # it does not recognize NixOS. A build that matched nothing leaves the
+  # directory absent, so the copy is conditional rather than mandatory.
+  optionalPackageDirs = [
+    "ruleset"
+  ];
+
   # Owned by the host. Created once from the package skeleton, then left alone.
   # These hold the agent's databases, queues and logs.
   stateDirs = [
@@ -66,6 +76,18 @@ let
         ''
       )
       packageDirs
+    }
+
+    ${concatMapStringsSep "\n"
+      (
+        dir: ''
+          if [ -d ${pkg}/${dir} ]; then
+            rm -rf ${stateDir}/${dir}
+            cp -R --no-preserve=ownership,mode ${pkg}/${dir} ${stateDir}/${dir}
+          fi
+        ''
+      )
+      optionalPackageDirs
     }
 
     ${
