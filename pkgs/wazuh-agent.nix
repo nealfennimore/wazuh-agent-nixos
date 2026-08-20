@@ -207,13 +207,26 @@ stdenv.mkDerivation {
       --replace-fail '"/bin/ps"' '"${procps}/bin/ps"' \
       --replace-fail '"/usr/bin/ps"' '"${procps}/bin/ps"'
 
-    # No hardcoded ps lookup may remain in Wazuh's own code. The first fix
+    # No hardcoded ps lookup may remain in code that runs. The first fix
     # covered src/rootcheck and shipped, then shared/os_utils.c turned up from
     # a running agent. Fail the build rather than find the next one in a log.
-    # src/external is vendored, and it holds procps itself, so it is out of
-    # scope here.
+    #
+    # Two trees are out of scope, and neither ships in the agent:
+    #
+    #   src/external     vendored, and it holds procps itself.
+    #   src/unit_tests   cmocka tests. src/unit_tests/syscheckd/test_common.c
+    #                    passes "/bin/ps" to is_file as a fixture, against
+    #                    __wrap_wopendir and __wrap_w_stat, so it never looks
+    #                    at a real path. The agent target does not build it.
+    #                    It needs LIBS_TEST=-lcmocka, which this derivation
+    #                    does not supply.
+    #
+    # The first run of this check found exactly those unit test lines and
+    # nothing else, so the three call sites above are the complete set at
+    # v4.14.7.
     if grep -rn --include='*.c' --include='*.h' \
-         -e '"/bin/ps"' -e '"/usr/bin/ps"' src | grep -v '^src/external/'; then
+         -e '"/bin/ps"' -e '"/usr/bin/ps"' src \
+         | grep -vE '^src/(external|unit_tests)/'; then
       echo "prePatch: a hardcoded ps lookup remains, listed above." >&2
       echo "prePatch: NixOS has neither /bin/ps nor /usr/bin/ps, so that call" >&2
       echo "prePatch: site fails at runtime. Add the file to the" >&2
