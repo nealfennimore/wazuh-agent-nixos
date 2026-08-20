@@ -77,6 +77,37 @@ pkgs.testers.runNixOSTest {
         # The upstream ignore that anchors the substitution must stay.
         agent.succeed("grep -q '<ignore>/sys/kernel/debug</ignore>' /var/ossec/etc/ossec.conf")
 
+    with subtest("the package ships the definitions modulesd requires"):
+        agent.succeed(
+            "grep -q '^wazuh_modules.rlimit_nofile=' /var/ossec/etc/internal_options.conf"
+        )
+
+    with subtest("an upgrade refreshes package files and keeps host state"):
+        # Recreate the state an upgrade leaves behind: an internal_options.conf
+        # from a version before the key existed. wazuh_modules.rlimit_nofile
+        # arrived in 4.13.0, and wazuh-modulesd exits 1 with
+        # "(2301): Definition not found for:" when it is missing.
+        agent.succeed(
+            "grep -v '^wazuh_modules.rlimit_nofile=' /var/ossec/etc/internal_options.conf"
+            " > /tmp/stale"
+        )
+        agent.succeed("cp /tmp/stale /var/ossec/etc/internal_options.conf")
+        agent.fail(
+            "grep -q '^wazuh_modules.rlimit_nofile=' /var/ossec/etc/internal_options.conf"
+        )
+
+        # Mark the files the host owns. These must survive.
+        agent.succeed("echo marker-keys >> /var/ossec/etc/client.keys")
+        agent.succeed("echo marker-local >> /var/ossec/etc/local_internal_options.conf")
+
+        agent.succeed("systemctl start setup-pre-wazuh.service")
+
+        agent.succeed(
+            "grep -q '^wazuh_modules.rlimit_nofile=' /var/ossec/etc/internal_options.conf"
+        )
+        agent.succeed("grep -q marker-keys /var/ossec/etc/client.keys")
+        agent.succeed("grep -q marker-local /var/ossec/etc/local_internal_options.conf")
+
     with subtest("the state directory belongs to the wazuh user"):
         agent.succeed("test -d /var/ossec/etc")
         agent.succeed("test $(stat -c %U /var/ossec) = wazuh")
