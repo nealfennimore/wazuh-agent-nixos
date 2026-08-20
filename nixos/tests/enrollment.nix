@@ -7,9 +7,10 @@
 # agent connects to remoted, and that an event written on the agent reaches the
 # manager's archive.
 #
-# It needs the manager container image, which comes from Docker Hub. See
-# nixos/tests/wazuh-manager-image.nix for the pin and the script that produces
-# it. checks.agent needs no manager and stays fast.
+# It needs the manager container image, which comes from Docker Hub. The pin
+# lives in nixos/tests/wazuh-manager-image.<arch>.json, written by
+# nixos/tests/prefetch-manager-image.sh. checks.agent needs no manager and
+# stays fast.
 {
   pkgs,
   wazuhModule,

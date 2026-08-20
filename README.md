@@ -234,15 +234,26 @@ against `authd`, that the manager records the enrollment in its own
 on the agent reaches the manager's archive.
 
 The manager image is not pinned in this repository, because a manifest digest
-and a hash cannot be guessed. Produce both values first:
+and a hash cannot be guessed. Write the pin first:
 
 ```bash
 ./nixos/tests/prefetch-manager-image.sh 4.14.7
+git add nixos/tests/wazuh-manager-image.amd64.json
 ```
 
-Copy the `imageDigest` and `sha256` it prints into
-`nixos/tests/wazuh-manager-image.nix`. Until then, this check throws with the
-same instructions. `checks.agent` is not affected.
+The script writes `nixos/tests/wazuh-manager-image.<arch>.json`.
+`nixos/tests/wazuh-manager-image.nix` reads that file and passes it to
+`dockerTools.pullImage`, so no hash is edited by hand. Until the file exists,
+this check throws with the same instructions. `checks.agent` is not affected.
+
+Commit the file before you run the check. A flake copies only the files that
+git tracks, so an uncommitted pin is invisible to Nix.
+
+One run produces one architecture. Pass a second argument to pin the other:
+
+```bash
+./nixos/tests/prefetch-manager-image.sh 4.14.7 arm64
+```
 
 Keep the manager version in step with `version` in `pkgs/wazuh-agent.nix`.
 Wazuh supports an agent older than its manager. It does not support an agent

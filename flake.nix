@@ -85,9 +85,10 @@
         # multi-gigabyte image from Docker Hub and boots two VMs, and that
         # must not become a precondition for the fast test.
         #
-        # The image pin lives in nixos/tests/wazuh-manager-image.nix. Until it
-        # is filled in, this check throws with instructions and checks.agent
-        # is unaffected, because flake outputs evaluate lazily.
+        # The image pin is a checked-in JSON file that
+        # nixos/tests/prefetch-manager-image.sh writes. Until it exists, this
+        # check throws with instructions and checks.agent is unaffected,
+        # because flake outputs evaluate lazily.
         checks.enrollment = import ./nixos/tests/enrollment.nix {
           inherit pkgs wazuhModule;
         };
