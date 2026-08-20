@@ -4,8 +4,8 @@
 #
 # Scope: this test proves that the module evaluates, that activation succeeds,
 # that the generated ossec.conf is correct, that the four daemons which do not
-# need a manager stay running under the sandbox, and that logcollector reads
-# entries out of the journal.
+# need a manager stay running under the sandbox, that logcollector reads entries
+# out of the journal, and that every command reader resolves on the daemon PATH.
 #
 # It does not prove delivery to a manager, and it does not prove
 # enrollment. Enrollment needs a running Wazuh manager, and this repository
@@ -237,5 +237,57 @@ pkgs.testers.runNixOSTest {
             + state
         )
         agent.succeed(f'test "$({drops})" -eq 0')
+
+    with subtest("every command reader resolves on the daemon PATH"):
+        # ossec-agent.conf ships three command readers: df -P, a netstat
+        # pipeline, and last -n 5. None of them names an absolute path, so each
+        # one depends on services.wazuh-agent.path.
+        #
+        # A missing binary is silent. read_command.c:28 calls popen, which runs
+        # /bin/sh -c and fails only when fork or pipe fails. A command that does
+        # not exist makes the shell exit 127, popen still succeeds, and the
+        # reader collects an empty result. So "Unable to execute command" at
+        # read_command.c:30 never appears, and the only symptom is a counter
+        # that never moves.
+        #
+        # Resolve each command against the PATH systemd gives the daemon.
+        env = agent.succeed(
+            "systemctl show -p Environment --value wazuh-logcollector.service"
+        ).strip()
+        daemon_path = None
+        for entry in env.split():
+            if entry.startswith("PATH="):
+                daemon_path = entry[len("PATH="):]
+        assert daemon_path, f"wazuh-logcollector has no PATH: {env!r}"
+
+        readers = agent.succeed(
+            r"sed -n 's|.*<command>\(.*\)</command>.*|\1|p' /var/ossec/etc/ossec.conf"
+        )
+        binaries = set()
+        for reader in readers.splitlines():
+            # Each stage of a pipeline needs its own binary. netstat -tan is
+            # piped through grep twice and then sort.
+            for stage in reader.split("|"):
+                words = stage.split()
+                if words:
+                    binaries.add(words[0])
+        assert binaries, "the generated ossec.conf has no command reader"
+
+        for binary in sorted(binaries):
+            agent.succeed(
+                f"env -i PATH={daemon_path} sh -c 'command -v {binary}' >/dev/null"
+            )
+
+    with subtest("the wazuh user can read the login records"):
+        # last -n 5 reads /var/log/wtmp. systemd creates the file from its own
+        # tmpfiles.d/var.conf as 0664 root:utmp, and nixpkgs builds systemd with
+        # the utmp meson option on glibc, so systemd-update-utmp writes a record
+        # at every boot.
+        #
+        # The wazuh user is not in the utmp group. Reading works only through
+        # the world-read bit, so a host that tightens wtmp to 0660 silences this
+        # reader with no error anywhere.
+        agent.succeed("test -f /var/log/wtmp")
+        agent.succeed("runuser -u wazuh -- test -r /var/log/wtmp")
   '';
 }
