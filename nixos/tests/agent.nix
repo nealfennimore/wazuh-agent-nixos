@@ -3,8 +3,11 @@
 #   nix build .#checks.x86_64-linux.agent
 #
 # Scope: this test proves that the module evaluates, that activation succeeds,
-# that the generated ossec.conf is correct, and that the four daemons which do
-# not need a manager stay running under the sandbox. It does not prove
+# that the generated ossec.conf is correct, that the four daemons which do not
+# need a manager stay running under the sandbox, and that logcollector reads
+# entries out of the journal.
+#
+# It does not prove delivery to a manager, and it does not prove
 # enrollment. Enrollment needs a running Wazuh manager, and this repository
 # packages only the agent, so wazuh-agent-auth is expected to fail inside the
 # test VM, and wazuh-agentd is excluded from the start-up check for the same
@@ -16,15 +19,21 @@
 pkgs.testers.runNixOSTest {
   name = "wazuh-agent";
 
-  nodes.agent = {
-    imports = [ wazuhModule ];
+  nodes.agent =
+    { pkgs, ... }:
+    {
+      imports = [ wazuhModule ];
 
-    services.wazuh-agent = {
-      enable = true;
-      manager.host = "192.0.2.10";
-      manager.port = 1514;
+      services.wazuh-agent = {
+        enable = true;
+        manager.host = "192.0.2.10";
+        manager.port = 1514;
+      };
+
+      # The journald subtest reads a counter out of the logcollector state
+      # file, which is JSON.
+      environment.systemPackages = [ pkgs.jq ];
     };
-  };
 
   testScript = ''
     daemons = [
@@ -173,5 +182,60 @@ pkgs.testers.runNixOSTest {
             "journalctl -u wazuh-modulesd"
             " | grep -q 'Could not open the default SCA ruleset folder'"
         )
+
+    with subtest("journald records reach the logcollector queue"):
+        # ossec.conf naming journald proves configuration, not collection. The
+        # reader dlopens libsystemd.so.0 by soname (journal_log.c:222), which
+        # resolves only through the rpath that pkgs/wazuh-agent.nix adds, and
+        # then opens the journal under ProtectSystem=strict with no
+        # capabilities. Both can fail while the unit stays active.
+
+        # read_journald.c:108 prints this after w_journal_context_create and
+        # the initial seek both succeed. Nothing earlier in the file does.
+        agent.wait_until_succeeds(
+            "journalctl -u wazuh-logcollector"
+            " | grep -q '(9203): Monitoring journal entries'",
+            timeout=120,
+        )
+
+        # The three errors that disable the reader for the life of the
+        # process. Each one leaves the unit active, so is-active misses them.
+        #   1608 failed to connect to the journal
+        #   1609 failed to seek to the end
+        #   1610 failed to read the next entry
+        for code in ["(1608)", "(1609)", "(1610)"]:
+            agent.fail(f"journalctl -u wazuh-logcollector | grep -q '{code}'")
+
+        # only-future-events defaults to true, so the probe must be written
+        # after the reader opened the journal.
+        for i in range(5):
+            agent.succeed(
+                "systemd-cat --identifier=wazuh-journald-probe"
+                f" echo wazuh-journald-ingest-probe-{i}"
+            )
+
+        # read_journald.c:173 hands each entry to w_msg_hash_queues_push under
+        # the location "journald", and that function counts the entry
+        # (logcollector.c:1836) before it reaches the socket. So this counts
+        # entries read, not entries delivered, which is the only claim this VM
+        # can support: it has no manager.
+        #
+        # logcollector.state_interval is 60, so the file is rewritten once a
+        # minute and the first write lands a minute after the daemon starts.
+        state = "/var/ossec/var/run/wazuh-logcollector.state"
+        events = (
+            """jq '.global.files[] | select(.location == "journald") | .events' """
+            + state
+        )
+        agent.wait_until_succeeds(f'test "$({events})" -gt 0', timeout=240)
+
+        # A target that accepts nothing would still count reads above. drops
+        # is the queue rejecting them.
+        drops = (
+            """jq '[.global.files[] | select(.location == "journald")"""
+            """ | .targets[].drops] | add' """
+            + state
+        )
+        agent.succeed(f'test "$({drops})" -eq 0')
   '';
 }
