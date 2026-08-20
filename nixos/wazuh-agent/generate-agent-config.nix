@@ -76,6 +76,19 @@ let
     [ lastUpstreamIgnore ] ++ map (p: "<ignore>${p}</ignore>") cfg.syscheck.ignore
   );
 
+  # Replace the whole block, not the bare <disabled> line. The template holds
+  # five copies of "<disabled>no</disabled>", and substitute rewrites every
+  # match, so editing the line alone would also silence four unrelated modules.
+  activeResponseBlock = ''
+    <active-response>
+        <disabled>no</disabled>
+      </active-response>'';
+
+  activeResponseReplacement = ''
+    <active-response>
+        <disabled>${yesNo (!cfg.activeResponse.enable)}</disabled>
+      </active-response>'';
+
   # The template gives <server> an address and no port.
   serverAddress = "<address>IP</address>";
   serverAddressAndPort = ''
@@ -126,11 +139,20 @@ pkgs.runCommand "ossec.conf"
       --replace-fail ${lib.escapeShellArg upstreamDirectories} \
                      ${lib.escapeShellArg directoriesLine} \
       --replace-fail ${lib.escapeShellArg lastUpstreamIgnore} \
-                     ${lib.escapeShellArg ignoreLines}
+                     ${lib.escapeShellArg ignoreLines} \
+      --replace-fail ${lib.escapeShellArg activeResponseBlock} \
+                     ${lib.escapeShellArg activeResponseReplacement}
 
     # The active response reader must survive as a plain file reader.
     grep -q '<location>/var/ossec/logs/active-responses.log</location>' ossec.conf
     test "$(grep -c '<log_format>journald</log_format>' ossec.conf)" -eq 1
+
+    # Exactly one active-response block, carrying the value this module chose.
+    # Four other modules use the same <disabled> spelling, so a substitution
+    # that caught the wrong one would be invisible here without the count.
+    test "$(grep -c '<active-response>' ossec.conf)" -eq 1
+    grep -A1 '<active-response>' ossec.conf \
+      | grep -q '<disabled>${yesNo (!cfg.activeResponse.enable)}</disabled>'
 
     # No FHS binary directory may survive the replacement above.
     if grep -qE '<directories>[^<]*/(usr/)?s?bin' ossec.conf; then

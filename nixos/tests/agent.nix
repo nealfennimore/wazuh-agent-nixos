@@ -35,13 +35,32 @@ pkgs.testers.runNixOSTest {
       environment.systemPackages = [ pkgs.jq ];
     };
 
+  # The same module with active response on, so one run covers both settings.
+  # This node asserts configuration and capabilities only. Firing a response
+  # needs a manager to send one.
+  nodes.responder =
+    { ... }:
+    {
+      imports = [ wazuhModule ];
+
+      services.wazuh-agent = {
+        enable = true;
+        manager.host = "192.0.2.10";
+        manager.port = 1514;
+        activeResponse.enable = true;
+      };
+    };
+
   testScript = ''
+    # wazuh-execd is not here. Active response is off by default, and execd
+    # with active response disabled logs "Active response disabled" and
+    # returns 0 (src/os_execd/execd.c:574-577), so the module defines no unit
+    # for it. The subtest at the end covers both settings.
     daemons = [
         "wazuh-agentd",
         "wazuh-logcollector",
         "wazuh-syscheckd",
         "wazuh-modulesd",
-        "wazuh-execd",
     ]
 
     agent.wait_for_unit("multi-user.target")
@@ -157,7 +176,6 @@ pkgs.testers.runNixOSTest {
             "wazuh-logcollector",
             "wazuh-syscheckd",
             "wazuh-modulesd",
-            "wazuh-execd",
         ]
         for daemon in unmanaged:
             agent.succeed(f"systemctl restart {daemon}.service")
@@ -297,6 +315,65 @@ pkgs.testers.runNixOSTest {
                 f"env -i PATH={daemon_path} /bin/sh -c 'command -v {binary}'"
                 " >/dev/null"
             )
+
+    with subtest("active response is off, and says so"):
+        # The template ships it enabled. Four other modules use the same
+        # <disabled> spelling, so check the count as well as the value.
+        agent.succeed(
+            "test $(grep -c '<active-response>' /var/ossec/etc/ossec.conf) -eq 1"
+        )
+        agent.succeed(
+            "grep -A1 '<active-response>' /var/ossec/etc/ossec.conf"
+            " | grep -q '<disabled>yes</disabled>'"
+        )
+
+        # No unit, because execd with active response disabled returns 0 at
+        # start and would report inactive forever.
+        agent.fail("systemctl cat wazuh-execd.service")
+
+        # No unit holds a capability in this configuration.
+        for daemon in daemons:
+            got = agent.succeed(
+                f"systemctl show -p AmbientCapabilities --value {daemon}.service"
+            ).strip()
+            assert got == "", f"{daemon} holds {got!r} with active response off"
+
+    with subtest("active response on grants execd exactly what it needs"):
+        responder.wait_for_file("/var/ossec/etc/ossec.conf", timeout=120)
+
+        responder.succeed(
+            "grep -A1 '<active-response>' /var/ossec/etc/ossec.conf"
+            " | grep -q '<disabled>no</disabled>'"
+        )
+
+        # execd exists here, and it is the only unit with a capability.
+        responder.succeed("systemctl cat wazuh-execd.service >/dev/null")
+        for prop in ["CapabilityBoundingSet", "AmbientCapabilities"]:
+            got = responder.succeed(
+                f"systemctl show -p {prop} --value wazuh-execd.service"
+            ).strip()
+            assert got == "cap_net_admin", f"execd {prop} is {got!r}"
+
+        # Only execd. The grant must not leak to the other four.
+        for daemon in daemons:
+            got = responder.succeed(
+                f"systemctl show -p AmbientCapabilities --value {daemon}.service"
+            ).strip()
+            assert got == "", f"{daemon} holds {got!r}, only execd should"
+
+        # firewall-drop resolves "iptables" through the PATH and execs it.
+        env = responder.succeed(
+            "systemctl show -p Environment --value wazuh-execd.service"
+        ).strip()
+        execd_path = None
+        for entry in env.split():
+            if entry.startswith("PATH="):
+                execd_path = entry[len("PATH="):]
+        assert execd_path, f"wazuh-execd has no PATH: {env!r}"
+        responder.succeed(
+            f"env -i PATH={execd_path} /bin/sh -c 'command -v iptables'"
+            " >/dev/null"
+        )
 
     with subtest("the wazuh user can read the login records"):
         # last -n 5 reads /var/log/wtmp. systemd creates the file from its own

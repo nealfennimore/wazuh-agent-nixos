@@ -120,6 +120,7 @@ sudo systemctl restart wazuh.target
 | `sca.scanOnStart` | `true` | Scans when the agent starts. |
 | `sca.interval` | `"12h"` | Time between scans. |
 | `sca.skipNfs` | `true` | Skips NFS mounts during a scan. |
+| `activeResponse.enable` | `false` | Lets the agent act on a finding, not only report it. |
 | `extraConfig` | `""` | XML appended to the generated `ossec.conf`. |
 | `config` | `null` | The complete `ossec.conf`. Replaces the generated file. |
 | `path` | see module | Packages on the PATH of the daemons. |
@@ -152,6 +153,28 @@ Policies come from the package at `ruleset/sca`. Upstream installs the set
 that matches the distribution and falls back to
 `sca_distro_independent_linux.yml`, which is what NixOS gets. `preStart`
 copies that directory into `/var/ossec`.
+
+### Active response
+
+Active response is off by default. That is what the sandbox already enforced
+before the option existed: the template ships active response enabled, but
+`wazuh-execd` runs as the `wazuh` user with no capabilities, and the response
+that matters, `firewall-drop`, execs `iptables` to add `INPUT` and `FORWARD`
+`DROP` rules. So the agent detected and could not respond, and nothing said
+so.
+
+With the option off, `ossec.conf` carries `<disabled>yes</disabled>` and no
+`wazuh-execd` unit is defined. `execd` with active response disabled logs
+`Active response disabled` and returns 0, so a unit for it would report
+inactive forever.
+
+```nix
+services.wazuh-agent.activeResponse.enable = true;
+```
+
+This grants `wazuh-execd` `CAP_NET_ADMIN`, puts `iptables` on its `PATH`, and
+enables the block in `ossec.conf`. Weigh that against the rest of this module.
+It is the only capability any unit holds.
 
 ### File integrity monitoring on NixOS
 
@@ -313,7 +336,14 @@ Every unit drops all capabilities and runs with `NoNewPrivileges`,
 `ProtectSystem = "strict"` and `ReadWritePaths = [ "/var/ossec" ]`, plus the
 usual `Protect*` and `Restrict*` set.
 
-Four options are left out on purpose. `ProtectProc`, `ProcSubset`,
+`SystemCallFilter`, `RestrictAddressFamilies`, `MemoryDenyWriteExecute` and
+`PrivateDevices` are applied. `checks.enrollment` is what tests them, because
+each one breaks a scan rather than the daemon that runs it, and `systemctl
+is-active` cannot see that. The check asserts that syscollector, SCA,
+rootcheck and file integrity monitoring each reach their own end line, and
+that no daemon died of a blocked syscall.
+
+Four other options are left out on purpose. `ProtectProc`, `ProcSubset`,
 `PrivateUsers` and `PrivatePIDs` each hide or remap other processes. rootcheck
 finds a hidden process by comparison of `kill(pid, 0)` and `getsid(pid)`
 against `/proc/<pid>`. Any of those four makes the two views disagree for every
@@ -337,7 +367,9 @@ systemd.services.wazuh-syscheckd.serviceConfig.ProtectHome = false;
   `wazuh/wazuh`, so it changes without a matching source tag. `prePatch` edits
   that file by structure and aborts the build if the structure changes.
 - The derivation sets `dontFixup = true`.
-- `SystemCallFilter`, `MemoryDenyWriteExecute`, `RestrictAddressFamilies` and
-  `PrivateDevices` are not set. Each one is plausible and none is tested. The
-  agent forks python wodles, loads an eBPF object in syscheckd, and reads
-  netlink from syscollector.
+- File integrity monitoring runs in scheduled mode. `whodata` mode loads an
+  eBPF object, and `bpf` is in `@privileged` rather than `@system-service`, so
+  it needs a `SystemCallFilter` exception that this module does not add.
+- `activeResponse.enable` covers firewall responses. `host-deny` writes
+  `/etc/hosts.deny` and `disable-account` runs `passwd`, and `ProtectSystem =
+  "strict"` and the absence of root stop both either way.

@@ -142,13 +142,18 @@ let
     ''}
   '';
 
+  # wazuh-execd is conditional. With active response disabled it reads the
+  # configuration, logs "Active response disabled" and returns 0
+  # (src/os_execd/execd.c:574-577). A unit that exits cleanly at start is not
+  # a failure, but it is a unit that reports inactive forever, so do not
+  # define one that has nothing to do.
   daemons = [
     "wazuh-modulesd"
     "wazuh-logcollector"
     "wazuh-syscheckd"
     "wazuh-agentd"
-    "wazuh-execd"
-  ];
+  ]
+  ++ optional cfg.activeResponse.enable "wazuh-execd";
 
   # Sandboxing shared by every unit in this module.
   #
@@ -189,6 +194,35 @@ let
     RemoveIPC = true;
     SystemCallArchitectures = "native";
     UMask = "0027";
+
+    # The four below were parked as plausible and untested. They are on now,
+    # and checks.enrollment is what tests them: it asserts that syscollector,
+    # SCA and rootcheck each finish a scan, and that no daemon died of SIGSYS.
+    # A restriction that breaks one of these does not stop the daemon, it
+    # stops the scan, so `systemctl is-active` cannot see it.
+
+    # The agent talks to the manager over IP, to its own daemons over Unix
+    # sockets, and to the kernel over netlink, which is how syscollector reads
+    # the network inventory. It needs no other family.
+    RestrictAddressFamilies = [
+      "AF_UNIX"
+      "AF_INET"
+      "AF_INET6"
+      "AF_NETLINK"
+    ];
+
+    # No component maps a page both writable and executable. The risk here was
+    # the python wodles, and none of them is enabled in the generated
+    # configuration.
+    MemoryDenyWriteExecute = true;
+
+    # Hardware inventory reads /proc and /sys, not device nodes.
+    PrivateDevices = true;
+
+    # bpf is in @privileged, not in @system-service, so file integrity
+    # monitoring in whodata mode would need an exception. The generated
+    # configuration uses scheduled mode, which does not load the eBPF object.
+    SystemCallFilter = [ "@system-service" ];
   };
 
   # Deliberately absent, and the reasons matter more than the list.
@@ -207,10 +241,22 @@ let
   # directory. read-only above keeps those two usable as FIM targets.
   #
   # SystemCallFilter, MemoryDenyWriteExecute, RestrictAddressFamilies and
-  # PrivateDevices are all plausible here and none of them is verified. The
-  # agent forks python wodles, loads an eBPF object in syscheckd, and reaches
-  # netlink from syscollector. Each of those fails quietly in a different way.
-  # Add them one at a time against a running agent, not as a block.
+  # PrivateDevices are no longer in this list. They are applied above, and the
+  # note there says what tests them.
+
+  # Active response needs one capability and one binary, and only execd needs
+  # them. firewall-drop resolves "iptables" through the PATH
+  # (src/active-response/firewalls/default-firewall-drop.c:89) and execs it to
+  # add INPUT and FORWARD DROP rules, which is CAP_NET_ADMIN.
+  #
+  # This does not make every active response work. host-deny writes
+  # /etc/hosts.deny and disable-account runs passwd, and ProtectSystem =
+  # "strict" and the absence of root stop both. Firewall responses are what
+  # this grant covers.
+  execdHardening = {
+    CapabilityBoundingSet = [ "CAP_NET_ADMIN" ];
+    AmbientCapabilities = [ "CAP_NET_ADMIN" ];
+  };
 
   mkService = d: {
     description = d;
@@ -227,15 +273,18 @@ let
     # it is that NixOS adds coreutils, findutils, gnugrep, gnused and systemd
     # to every service path by default, so the commands the agent runs kept
     # resolving.
-    path = cfg.path ++ [
-      "/run/current-system/sw"
-      "/run/wrappers"
-    ];
+    path =
+      cfg.path
+      ++ optional (d == "wazuh-execd" && cfg.activeResponse.enable) pkgs.iptables
+      ++ [
+        "/run/current-system/sw"
+        "/run/wrappers"
+      ];
     environment = {
       WAZUH_HOME = stateDir;
     };
 
-    serviceConfig = hardening // {
+    serviceConfig = hardening // optionalAttrs (d == "wazuh-execd") execdHardening // {
       Type = "exec";
       User = wazuhUser;
       Group = wazuhGroup;
@@ -425,6 +474,38 @@ in
             type = types.bool;
             default = true;
             description = "Whether to skip NFS mounts during a scan.";
+          };
+        };
+      };
+    };
+
+    activeResponse = mkOption {
+      description = ''
+        Active response, which lets the manager tell this agent to act on a
+        finding rather than only report it.
+
+        The default is off, and that is what the sandbox already enforced
+        before this option existed. The template ships active response
+        enabled, but wazuh-execd runs as the wazuh user with no capabilities,
+        and the response that matters, firewall-drop, execs iptables to add
+        INPUT and FORWARD DROP rules. So the agent detected and could not
+        respond, and nothing said so. Turning this off states that.
+
+        Setting it to true grants wazuh-execd CAP_NET_ADMIN, puts iptables on
+        its PATH, and enables the block in ossec.conf. Weigh that against the
+        rest of this module: it is the only capability any unit holds.
+
+        Firewall responses are what the grant covers. host-deny writes
+        /etc/hosts.deny and disable-account runs passwd, and ProtectSystem =
+        "strict" and the absence of root stop both either way.
+      '';
+      default = { };
+      type = types.submodule {
+        options = {
+          enable = mkOption {
+            type = types.bool;
+            default = false;
+            description = "Whether the agent may act on a finding.";
           };
         };
       };

@@ -131,12 +131,13 @@ pkgs.testers.runNixOSTest {
     with subtest("the agent connects to remoted"):
         # The daemons started before a key existed. Restart them by name:
         # restarting the target does not restart what the target wants.
+        # No wazuh-execd: active response is off by default, so the module
+        # defines no unit for it.
         daemons = [
             "wazuh-agentd",
             "wazuh-logcollector",
             "wazuh-syscheckd",
             "wazuh-modulesd",
-            "wazuh-execd",
         ]
         for daemon in daemons:
             agent.succeed(f"systemctl restart {daemon}.service")
@@ -153,6 +154,44 @@ pkgs.testers.runNixOSTest {
         agent.wait_until_succeeds(
             f"grep -q \"^status='connected'\" {state}", timeout=240
         )
+
+    with subtest("every scan finishes under the sandbox"):
+        # This is what tests SystemCallFilter, RestrictAddressFamilies,
+        # MemoryDenyWriteExecute and PrivateDevices. Each of them breaks a
+        # scan rather than the daemon that runs it, so `systemctl is-active`
+        # cannot see the failure. Only a scan that reaches its own end line
+        # can.
+        #
+        # These need a manager. syscheckd blocks on "Agent is now online"
+        # before it starts rootcheck, so checks.agent can never run them.
+        for unit, line, seconds in [
+            # netlink, which RestrictAddressFamilies would cut
+            ("wazuh-modulesd", "syscollector: INFO: Evaluation finished", 300),
+            # popen and ps, and every process rule in the policy
+            ("wazuh-modulesd", "sca: INFO: Evaluation finished", 600),
+            # /proc walking and the PID comparison in check_rc_pids.c
+            ("wazuh-syscheckd", "rootcheck: INFO: Ending rootcheck scan", 600),
+            # the file integrity scan itself
+            ("wazuh-syscheckd", "(6009): File integrity monitoring scan ended", 600),
+        ]:
+            agent.wait_until_succeeds(
+                f"journalctl -u {unit} | grep -q '{line}'", timeout=seconds
+            )
+
+        # A blocked syscall kills the process with SIGSYS, and systemd records
+        # it. Check anyway: a daemon that died and was not restarted would
+        # have failed a wait above, but one that died after finishing its scan
+        # would not.
+        for daemon in daemons:
+            agent.fail(
+                f"systemctl show -p Result --value {daemon}.service"
+                " | grep -q signal"
+            )
+            agent.fail(f"journalctl -u {daemon} | grep -q 'Bad system call'")
+
+        # The ps lookup patched in 5d7422a runs inside SCA's process rules.
+        # A syscall filter that broke popen would show up here first.
+        agent.fail("journalctl -u wazuh-modulesd | grep -q \"'ps' not found\"")
 
     with subtest("an event written on the agent reaches the manager archive"):
         # logall_json archives every event that analysisd decodes, whether or
