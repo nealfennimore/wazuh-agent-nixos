@@ -216,9 +216,42 @@ enrollment, because the agent keeps its key in `/var/ossec`.
 nix build .#checks.x86_64-linux.agent
 ```
 
-The test boots a VM, then confirms that activation succeeds and that the
-generated `ossec.conf` is correct. It does not confirm enrollment. Enrollment
-needs a running manager, and this repository packages only the agent.
+The test boots a VM, then confirms that activation succeeds, that the generated
+`ossec.conf` is correct, that logcollector reads the journal, and that every
+command reader resolves on the daemon PATH. It needs no manager, so it stays
+fast.
+
+## Run the enrollment test
+
+```bash
+nix build .#checks.x86_64-linux.enrollment
+```
+
+This test boots two VMs. One runs the agent module. The other runs the Wazuh
+manager container image from Docker Hub. It confirms that the agent enrolls
+against `authd`, that the manager records the enrollment in its own
+`client.keys`, that the agent connects to `remoted`, and that an event written
+on the agent reaches the manager's archive.
+
+The manager image is not pinned in this repository, because a manifest digest
+and a hash cannot be guessed. Produce both values first:
+
+```bash
+./nixos/tests/prefetch-manager-image.sh 4.14.7
+```
+
+Copy the `imageDigest` and `sha256` it prints into
+`nixos/tests/wazuh-manager-image.nix`. Until then, this check throws with the
+same instructions. `checks.agent` is not affected.
+
+Keep the manager version in step with `version` in `pkgs/wazuh-agent.nix`.
+Wazuh supports an agent older than its manager. It does not support an agent
+newer than its manager.
+
+The test runs the manager alone. It does not run the indexer or the dashboard.
+The check reads the manager's archive file and never reads an index, the two
+extra images are much larger than the manager image, and the indexer needs a
+TLS certificate set that this repository does not hold.
 
 ## Build the package alone
 

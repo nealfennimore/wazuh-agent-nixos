@@ -75,9 +75,20 @@
           }).config.system.build.vm;
 
         # A headless test of the module. It asserts activation and the
-        # generated ossec.conf. It does not assert enrollment, which needs a
-        # manager this repository does not package.
+        # generated ossec.conf. It needs no manager, so it stays fast.
         checks.agent = import ./nixos/tests/agent.nix {
+          inherit pkgs wazuhModule;
+        };
+
+        # Enrollment and delivery, against the Wazuh manager container image.
+        # Kept separate from checks.agent on purpose: this one pulls a
+        # multi-gigabyte image from Docker Hub and boots two VMs, and that
+        # must not become a precondition for the fast test.
+        #
+        # The image pin lives in nixos/tests/wazuh-manager-image.nix. Until it
+        # is filled in, this check throws with instructions and checks.agent
+        # is unaffected, because flake outputs evaluate lazily.
+        checks.enrollment = import ./nixos/tests/enrollment.nix {
           inherit pkgs wazuhModule;
         };
 
