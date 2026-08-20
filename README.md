@@ -124,6 +124,7 @@ sudo systemctl restart wazuh.target
 | `sca.interval` | `"12h"` | Time between scans. |
 | `sca.skipNfs` | `true` | Skips NFS mounts during a scan. |
 | `activeResponse.enable` | `false` | Lets the agent act on a finding, not only report it. |
+| `activeResponse.responses` | firewall-drop, route-null, wazuh-slack | Which responses this host is prepared to run. |
 | `extraConfig` | `""` | XML appended to the generated `ossec.conf`. |
 | `config` | `null` | The complete `ossec.conf`. Replaces the generated file. |
 | `path` | see module | Packages on the PATH of the daemons. |
@@ -177,32 +178,51 @@ inactive forever.
 services.wazuh-agent.activeResponse.enable = true;
 ```
 
-This grants `wazuh-execd` `CAP_NET_ADMIN`, puts `iptables` and `curl` on its
-`PATH`, and enables the block in `ossec.conf`. Weigh that against the rest of
-this module. It is the only capability any unit holds.
+Each response is granted what it needs, and nothing more. `responses` selects
+which ones this host is prepared to run.
 
-Three of the scripts the package ships for Linux work under this sandbox.
+```nix
+services.wazuh-agent.activeResponse = {
+  enable = true;
+  responses = [ "firewall-drop" "host-deny" ];
+};
+```
 
-| Script | Needs | Supplied by |
-|--------|-------|-------------|
-| `firewall-drop` | `iptables`, `ip6tables`, `CAP_NET_ADMIN` | the option |
-| `route-null` | `route`, `CAP_NET_ADMIN` | `nettools`, already in `path` |
-| `wazuh-slack` | `curl` or `wget`, no capability | the option |
+| Response | Needs | In the default list |
+|----------|-------|---------------------|
+| `firewall-drop` | `iptables` and `ip6tables`, `CAP_NET_ADMIN` | yes |
+| `route-null` | `route` from `nettools`, `CAP_NET_ADMIN` | yes |
+| `wazuh-slack` | `curl`, no capability | yes |
+| `host-deny` | `/etc/hosts.deny` writable by the `wazuh` user | no |
 
-The rest do not, and the reasons do not change with configuration.
+`host-deny` is out of the default list because the grant is a different shape.
+The path is hardcoded, `ProtectSystem = "strict"` makes `/etc` read-only, and
+the file is normally owned by root. Selecting it adds `/etc/hosts.deny` to
+`ReadWritePaths` for `wazuh-execd` alone and creates the file owned by the
+`wazuh` user. Little reads that file on a modern NixOS host, so select it only
+if something on yours does.
 
-| Script | Why not |
-|--------|---------|
-| `disable-account` | Runs `passwd`, a setuid wrapper on NixOS. `NoNewPrivileges` blocks setuid. |
-| `host-deny` | Writes `/etc/hosts.deny`. `ProtectSystem = "strict"` makes it read-only. |
-| `firewalld-drop` | Needs `firewalld` running and reachable over D-Bus. |
-| `restart-wazuh`, `restart.sh` | Restart through `wazuh-control`, which fights systemd. |
-| `ipfw`, `npf`, `pf` | BSD firewalls. |
-| `kaspersky` | Needs the Kaspersky Endpoint Security CLI. |
+`CAP_NET_ADMIN` is the only capability any unit in this module holds, and only
+`wazuh-execd` holds it. Drop `firewall-drop` and `route-null` from the list and
+no unit holds a capability at all.
+
+**This list does not restrict the manager.** Every script the package ships
+stays in `active-response/bin`, and the manager decides which to invoke. The
+list controls whether the binary and the privilege that script needs are
+present. A response the manager sends that is not listed fails.
 
 Each script resolves its binary with a `PATH` lookup, and a miss is written to
 `logs/active-responses.log` rather than to the journal. `logcollector` reads
 that file, so the manager sees it. The agent's own journal does not.
+
+Four are not offered, and none of the four is a capability question.
+
+| Script | Why not |
+|--------|---------|
+| `disable-account` | Runs `passwd -l`. `shadow` takes `amroot` from the **real** UID (`passwd.c:71,767`) and refuses the flag when it is not 0 (`passwd.c:972`). A setuid wrapper changes the effective UID, so it does not help. This needs `wazuh-execd` to run as root. |
+| `firewalld-drop` | Needs `firewalld` running and reachable over D-Bus. A host decision, not a grant. |
+| `restart-wazuh`, `restart.sh` | Restart through `wazuh-control`, which starts daemons outside the supervision systemd already provides. |
+| `ipfw`, `npf`, `pf`, `kaspersky` | BSD firewalls, and a vendor CLI that is not packaged here. |
 
 ### Verify the manager during enrollment
 
@@ -429,6 +449,7 @@ systemd.services.wazuh-syscheckd.serviceConfig.ProtectHome = false;
 - File integrity monitoring runs in scheduled mode. `whodata` mode loads an
   eBPF object, and `bpf` is in `@privileged` rather than `@system-service`, so
   it needs a `SystemCallFilter` exception that this module does not add.
-- `activeResponse.enable` covers firewall responses. `host-deny` writes
-  `/etc/hosts.deny` and `disable-account` runs `passwd`, and `ProtectSystem =
-  "strict"` and the absence of root stop both either way.
+- `activeResponse.responses` offers four of the scripts the package ships.
+  `disable-account`, `firewalld-drop` and `restart-wazuh` are not among them,
+  and none of the three is blocked by a missing capability. See the active
+  response section for each reason.

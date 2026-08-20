@@ -250,41 +250,92 @@ let
   # PrivateDevices are no longer in this list. They are applied above, and the
   # note there says what tests them.
 
-  # Active response needs one capability, and only execd needs it. Each script
-  # resolves its binary through get_binary_path, which is a PATH lookup, and a
-  # miss is written to logs/active-responses.log rather than to the journal.
+  # What each active response needs, granted per response rather than as one
+  # block. Only wazuh-execd runs them, so nothing here reaches another unit.
   #
-  # Of the scripts the package ships for Linux, three can work here:
-  #
-  #   firewall-drop  iptables and ip6tables, CAP_NET_ADMIN
-  #                  (firewalls/default-firewall-drop.c:89)
-  #   route-null     route, CAP_NET_ADMIN. Note route and not ip, so this
-  #                  comes from nettools, already in the path default
-  #                  (route-null.c:67)
-  #   wazuh-slack    curl or wget, and no capability at all
-  #                  (wazuh-slack.c:79,105)
-  #
-  # The rest cannot, and the reasons are worth keeping:
-  #
-  #   disable-account  runs passwd, which on NixOS is a setuid wrapper, and
-  #                    NoNewPrivileges blocks setuid outright
-  #   host-deny        writes /etc/hosts.deny, which ProtectSystem = "strict"
-  #                    makes read-only
-  #   firewalld-drop   needs firewalld running and reachable over D-Bus
-  #   restart-wazuh    restarts through wazuh-control, which fights systemd
-  #   ipfw, npf, pf    BSD firewalls
-  execdHardening = {
-    CapabilityBoundingSet = [ "CAP_NET_ADMIN" ];
-    AmbientCapabilities = [ "CAP_NET_ADMIN" ];
+  # Each script resolves its binary through get_binary_path, which is a PATH
+  # lookup, and a miss is written to logs/active-responses.log rather than to
+  # the journal. So a response that is selected without its binary fails in a
+  # place the agent's own log never shows.
+  responseRequirements = {
+    # Adds INPUT and FORWARD DROP rules. iptables supplies ip6tables too.
+    # firewalls/default-firewall-drop.c:89
+    firewall-drop = {
+      packages = [ pkgs.iptables ];
+      capabilities = [ "CAP_NET_ADMIN" ];
+      readWritePaths = [ ];
+      tmpfiles = [ ];
+    };
+
+    # Adds a reject route. Note that it resolves "route" and not "ip"
+    # (route-null.c:67), so nettools in the path default already covers it.
+    route-null = {
+      packages = [ pkgs.nettools ];
+      capabilities = [ "CAP_NET_ADMIN" ];
+      readWritePaths = [ ];
+      tmpfiles = [ ];
+    };
+
+    # Posts to a webhook. No capability at all, only a binary.
+    # wazuh-slack.c:79,105
+    wazuh-slack = {
+      packages = [ pkgs.curl ];
+      capabilities = [ ];
+      readWritePaths = [ ];
+      tmpfiles = [ ];
+    };
+
+    # Appends to /etc/hosts.deny, and the path is hardcoded on Linux
+    # (host-deny.c:14,81). Two things block it and neither is a capability:
+    # ProtectSystem = "strict" makes /etc read-only, and the file is root
+    # owned. So punch a hole for that one path and create the file owned by
+    # the wazuh user. The leading - tolerates its absence at unit start.
+    #
+    # Little reads /etc/hosts.deny on a modern NixOS host. Select this only if
+    # something on yours does.
+    host-deny = {
+      packages = [ ];
+      capabilities = [ ];
+      readWritePaths = [ "-/etc/hosts.deny" ];
+      tmpfiles = [ "f /etc/hosts.deny 0644 ${wazuhUser} ${wazuhGroup} -" ];
+    };
   };
 
-  # iptables covers firewall-drop, and supplies ip6tables with it. curl covers
-  # wazuh-slack, which needs no capability and would otherwise fail for want
-  # of a binary. route comes from nettools in the path default.
-  execdPackages = [
-    pkgs.iptables
-    pkgs.curl
-  ];
+  # The rest of what the package ships cannot be reached from here, and none
+  # of the three is a capability question:
+  #
+  #   disable-account  runs `passwd -l`. shadow sets amroot from the real UID
+  #                    (passwd.c:71,767) and refuses the flag when it is not 0
+  #                    (passwd.c:972). A setuid wrapper changes the effective
+  #                    UID, so it does not help. This needs execd to run as
+  #                    root, which would undo the privilege separation the
+  #                    rest of this module is built on.
+  #   firewalld-drop   needs firewalld running and reachable over D-Bus, which
+  #                    is a host decision rather than a grant.
+  #   restart-wazuh    restarts through wazuh-control, which starts daemons
+  #                    outside the supervision systemd already provides.
+  #   ipfw, npf, pf    BSD firewalls.
+
+  # Guarded on enable, so that a stale responses list grants nothing and
+  # creates nothing while active response is off.
+  selectedResponses = optionals cfg.activeResponse.enable (
+    map (r: responseRequirements.${r}) cfg.activeResponse.responses
+  );
+  gather = attr: unique (concatMap (r: r.${attr}) selectedResponses);
+
+  execdPackages = gather "packages";
+  execdCapabilities = gather "capabilities";
+
+  execdHardening =
+    optionalAttrs (execdCapabilities != [ ]) {
+      CapabilityBoundingSet = execdCapabilities;
+      AmbientCapabilities = execdCapabilities;
+    }
+    // optionalAttrs (gather "readWritePaths" != [ ]) {
+      # This replaces the shared value rather than adding to it, so stateDir
+      # has to come along.
+      ReadWritePaths = [ stateDir ] ++ gather "readWritePaths";
+    };
 
   mkService = d: {
     description = d;
@@ -595,6 +646,48 @@ in
             default = false;
             description = "Whether the agent may act on a finding.";
           };
+
+          responses = mkOption {
+            type = types.listOf (
+              types.enum [
+                "firewall-drop"
+                "route-null"
+                "wazuh-slack"
+                "host-deny"
+              ]
+            );
+            default = [
+              "firewall-drop"
+              "route-null"
+              "wazuh-slack"
+            ];
+            example = [
+              "firewall-drop"
+              "host-deny"
+            ];
+            description = ''
+              Which active responses this host is prepared to run. Each entry
+              adds only what that response needs, so a shorter list is a
+              smaller grant.
+
+              This does not restrict the manager. Every script the package
+              ships stays in active-response/bin, and the manager decides
+              which to invoke. What this list controls is whether the binary
+              and the privilege that script needs are present. A response the
+              manager sends that is not listed here fails, and the failure is
+              written to logs/active-responses.log rather than to the journal.
+
+              The default is the three that need nothing beyond CAP_NET_ADMIN
+              and a binary. host-deny is not in it: it needs /etc/hosts.deny
+              made writable by the wazuh user, and little reads that file on a
+              modern NixOS host.
+
+              disable-account, firewalld-drop, restart-wazuh and the BSD
+              firewall scripts are not offered. See the comment above
+              responseRequirements in this file for why each one cannot be
+              reached from a sandboxed unit.
+            '';
+          };
         };
       };
     };
@@ -680,7 +773,10 @@ in
     systemd.tmpfiles.rules = [
       "d ${stateDir} 0750 ${wazuhUser} ${wazuhGroup} -"
       "d ${stateDir}/tmp 0750 ${wazuhUser} ${wazuhGroup} 1d"
-    ];
+    ]
+    # A selected response may need a file outside /var/ossec to exist and to
+    # belong to the wazuh user. Only host-deny does today.
+    ++ gather "tmpfiles";
 
     systemd.targets.multi-user.wants = [ "wazuh.target" ];
     systemd.targets.wazuh.wants = map (d: "${d}.service") daemons;

@@ -58,6 +58,14 @@ pkgs.testers.runNixOSTest {
         manager.host = "192.0.2.10";
         manager.port = 1514;
         activeResponse.enable = true;
+        # host-deny is not in the default list. Select it here so the run
+        # covers the one response that needs a path rather than a capability.
+        activeResponse.responses = [
+          "firewall-drop"
+          "route-null"
+          "wazuh-slack"
+          "host-deny"
+        ];
 
         # Contents do not matter here. Nothing reads them without a manager,
         # and what this node checks is that the paths reach both enrollment
@@ -398,10 +406,25 @@ pkgs.testers.runNixOSTest {
             if entry.startswith("PATH="):
                 execd_path = entry[len("PATH="):]
         assert execd_path, f"wazuh-execd has no PATH: {env!r}"
-        responder.succeed(
-            f"env -i PATH={execd_path} /bin/sh -c 'command -v iptables'"
-            " >/dev/null"
+        for binary in ["iptables", "ip6tables", "route", "curl"]:
+            responder.succeed(
+                f"env -i PATH={execd_path} /bin/sh -c 'command -v {binary}'"
+                " >/dev/null"
+            )
+
+        # host-deny appends to a hardcoded /etc/hosts.deny. ProtectSystem =
+        # "strict" makes /etc read-only and the file is normally root owned,
+        # so selecting that response has to fix both. Neither is a capability.
+        rwp = responder.succeed(
+            "systemctl show -p ReadWritePaths --value wazuh-execd.service"
         )
+        assert "/etc/hosts.deny" in rwp, f"execd cannot write hosts.deny: {rwp}"
+        assert "/var/ossec" in rwp, f"execd lost its state directory: {rwp}"
+        responder.succeed("test $(stat -c %U /etc/hosts.deny) = wazuh")
+        responder.succeed("runuser -u wazuh -- test -w /etc/hosts.deny")
+
+        # Not selected on the default node, so nothing there was widened.
+        agent.fail("test -e /etc/hosts.deny")
 
     with subtest("enrollment is unverified unless a CA is configured"):
         # Off by default, and the absence must be an absent block rather than
