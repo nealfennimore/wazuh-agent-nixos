@@ -74,7 +74,7 @@ let
       sha256 = "sha256-ggIDf/I4QlSypFpsRibsdWd9bSevC2mfyEenlYZQdqI=";
       fetchSubmodules = true;
     };
-    # 02-libbpf-bootstrap.patch disables the CMake download of this file, so the
+    # The prePatch CMake rewrite disables the download of this file, so the
     # derivation supplies it instead.
     modern_bpf_c = fetchurl {
       url = "https://raw.githubusercontent.com/wazuh/wazuh/v${version}/src/syscheckd/src/ebpf/src/modern.bpf.c";
@@ -134,7 +134,13 @@ stdenv.mkDerivation {
   ];
 
   patches = [
-    ./patches/01-nixos-build-and-homedir.patch
+    # One concern per file. See patches/README.md for the runtime reason and
+    # the condition under which each downstream change can be retired.
+    ./patches/00-do-not-strip-read-only-library-copies.patch
+    ./patches/01-link-libdb-for-agent.patch
+    ./patches/02-build-openssl-with-perl.patch
+    ./patches/03-use-wazuh-home.patch
+    ./patches/04-systemd-owns-supplementary-groups.patch
   ];
 
   # GCC 13 and later reject the incompatible pointer types in the vendored
@@ -168,9 +174,6 @@ stdenv.mkDerivation {
 
     substituteInPlace src/external/audit-userspace/autogen.sh \
       --replace-warn "cp INSTALL.tmp INSTALL" ""
-
-    substituteInPlace src/external/openssl/config \
-      --replace-warn "/usr/bin/env" "env"
 
     substituteInPlace src/init/inst-functions.sh \
       --replace-warn "WAZUH_GROUP='wazuh'" "WAZUH_GROUP='nixbld'" \

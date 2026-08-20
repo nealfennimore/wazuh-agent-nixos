@@ -1,0 +1,13 @@
+diff --git a/src/Makefile b/src/Makefile
+index 2f90c9d..103364f 100644
+--- a/src/Makefile
++++ b/src/Makefile
+@@ -976,7 +976,7 @@ else
+ 	cd ${EXTERNAL_OPENSSL} && ./Configure $(OPENSSL_FLAGS) solaris-sparcv9-gcc && ${MAKE} build_libs
+ endif
+ else
+-	cd ${EXTERNAL_OPENSSL} && ./config $(OPENSSL_FLAGS) && ${MAKE} build_libs
++	cd ${EXTERNAL_OPENSSL} && perl ./Configure $(OPENSSL_FLAGS) && ${MAKE} build_libs
+ endif
+ endif
+ endif

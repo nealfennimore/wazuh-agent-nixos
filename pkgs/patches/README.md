@@ -1,0 +1,16 @@
+# Downstream Wazuh patches
+
+These patches target Wazuh 4.14.7. Each file has one reason to exist so a
+future version bump can test and retire it independently.
+
+| Patch | Why it exists | Removal condition |
+|---|---|---|
+| `00-do-not-strip-read-only-library-copies.patch` | `cp` preserves the Nix store libraries' non-writable mode. Modern binutils `strip` copies back with `O_TRUNC` rather than renaming over the target, so stripping the mode-0555 copy fails. The patch removes only these two strip commands; a global `STRIP_TOOL=true` would leak into vendored sub-makes. | Upstream makes the copies writable before stripping, or binutils can again replace a non-writable target using only directory permissions. |
+| `01-link-libdb-for-agent.patch` | The Linux agent build uses libdb-backed code but omits `DB_LIB` from its link set. | Upstream links `DB_LIB` for `TARGET=agent`, or the agent builds and its libdb call paths run without it. |
+| `02-build-openssl-with-perl.patch` | The vendored OpenSSL `config` launcher is not directly executable in the Nix build environment. Calling `Configure` through the packaged Perl interpreter avoids its FHS launcher. | The vendored launcher runs in the sandbox, or upstream invokes `Configure` through an explicit interpreter. |
+| `03-use-wazuh-home.patch` | Store-path executables make upstream derive the immutable package tree as the runtime home. NixOS keeps mutable agent state in `/var/ossec`, supplied through `WAZUH_HOME`. | Upstream gives the environment/configured home precedence over `/proc/self/exe`. |
+| `04-systemd-owns-supplementary-groups.patch` | systemd already starts each process with its final groups. Wazuh's later `setgroups` call fails without `CAP_SETGID`; granting that capability would weaken the sandbox only to repeat systemd's work. | Upstream can skip `setgroups` when already at the configured identity. |
+
+The split also removed a derivation-time rewrite of
+`src/external/openssl/config`. Patch 02 bypasses that launcher and calls
+`Configure` through Perl, so editing the unused file had no effect.

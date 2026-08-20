@@ -1,0 +1,39 @@
+diff --git a/src/shared/file_op.c b/src/shared/file_op.c
+index fbb20e3..2c8c007 100644
+--- a/src/shared/file_op.c
++++ b/src/shared/file_op.c
+@@ -3282,30 +3282,12 @@ char *w_homedir(char *arg) {
+         buff = w_strtok_r_str_delim(delim, &buff);
+     }
+ #else
+-    if (realpath("/proc/self/exe", buff) != NULL) {
+-        dirname(buff);
+-        buff = w_strtok_r_str_delim(delim, &buff);
+-    }
+-    else if (realpath("/proc/curproc/file", buff) != NULL) {
+-        dirname(buff);
+-        buff = w_strtok_r_str_delim(delim, &buff);
+-    }
+-    else if (realpath("/proc/self/path/a.out", buff) != NULL) {
+-        dirname(buff);
+-        buff = w_strtok_r_str_delim(delim, &buff);
++    // NixOS stores the executable in /nix/store and mutable state elsewhere.
++    const char *home_env = getenv(WAZUH_HOME_ENV);
++    if (home_env != NULL) {
++        snprintf(buff, PATH_MAX, "%s", home_env);
+     }
+ #endif
+-    else if (realpath(arg, buff) != NULL) {
+-        dirname(buff);
+-        buff = w_strtok_r_str_delim(delim, &buff);
+-    } else {
+-        // The path was not found so read WAZUH_HOME env var
+-        char * home_env = NULL;
+-        if (home_env = getenv(WAZUH_HOME_ENV), home_env) {
+-            snprintf(buff, PATH_MAX, "%s", home_env);
+-        }
+-    }
+-
+     if ((w_stat(buff, &buff_stat) < 0) || !S_ISDIR(buff_stat.st_mode)) {
+         os_free(buff);
+         merror_exit(HOME_ERROR);

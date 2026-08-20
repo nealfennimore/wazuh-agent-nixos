@@ -1,0 +1,13 @@
+diff --git a/src/Makefile b/src/Makefile
+index 2f90c9d..07a90ca 100644
+--- a/src/Makefile
++++ b/src/Makefile
+@@ -898,7 +898,7 @@ endif
+ ifeq ($(CHECK_CENTOS5),YES)
+ EXTERNAL_LIBS += $(PROCPS_LIB)
+ else
+-EXTERNAL_LIBS += $(PROCPS_LIB) $(LIBALPM_LIB) $(LIBARCHIVE_LIB)
++EXTERNAL_LIBS += $(PROCPS_LIB) $(LIBALPM_LIB) $(LIBARCHIVE_LIB) $(DB_LIB)
+ endif
+ endif
+ endif

@@ -1,0 +1,20 @@
+diff --git a/src/Makefile b/src/Makefile
+index 2f90c9d..09b5251 100644
+--- a/src/Makefile
++++ b/src/Makefile
+@@ -734,15 +734,9 @@ endif
+ 
+ ${WAZUH_LIB_OUTPUT_PATH}${LIBSTDCPP_NAME}: ${libstdc++_path}
+ 	cp $< $@
+-ifneq (${uname_S},AIX)
+-	${STRIP_TOOL} -x $@
+-endif
+ 
+ ${WAZUH_LIB_OUTPUT_PATH}${LIBGCC_S_NAME}: ${libgcc_s_path}
+ 	cp $< $@
+-ifneq (${uname_S},AIX)
+-	${STRIP_TOOL} -x $@
+-endif
+ 
+ .PHONY: server local hybrid agent selinux
+ 

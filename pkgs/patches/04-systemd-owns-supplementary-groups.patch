@@ -1,0 +1,26 @@
+diff --git a/src/shared/privsep_op.c b/src/shared/privsep_op.c
+index e7e0391..f1cc50f 100644
+--- a/src/shared/privsep_op.c
++++ b/src/shared/privsep_op.c
+@@ -147,20 +147,7 @@ int Privsep_SetUser(uid_t uid)
+ 
+ int Privsep_SetGroup(gid_t gid)
+ {
+-    if (setgroups(1, &gid) == -1) {
+-        return (OS_INVALID);
+-    }
+-
+-#ifndef HPUX
+-    if (setegid(gid) < 0) {
+-        return (OS_INVALID);
+-    }
+-#endif
+-
+-    if (setgid(gid) < 0) {
+-        return (OS_INVALID);
+-    }
+-
++    (void)gid;
+     return (OS_SUCCESS);
+ }
+ 
