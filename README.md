@@ -220,13 +220,47 @@ host must reach that server.
 The script rewrites `pkgs/dependencies/external_dependencies.nix`. It writes
 nothing if any download fails.
 
+## Hardening
+
+The daemons run as the `wazuh` user under systemd. They start from the store
+path directly. This module does not use `security.wrappers`.
+
+An earlier version did. It built a setuid and setgid wrapper per daemon, at
+mode `-r-s--s--x` owned `wazuh:wazuh`. The final `x` is the world execute bit,
+so every local user could run those binaries as the account that owns
+`/var/ossec` and therefore `etc/client.keys`. The wrappers served no purpose,
+because systemd already sets `User` and `Group`, and because the `w_homedir`
+patch makes the daemons read `WAZUH_HOME` from the environment.
+
+Every unit drops all capabilities and runs with `NoNewPrivileges`,
+`ProtectSystem = "strict"` and `ReadWritePaths = [ "/var/ossec" ]`, plus the
+usual `Protect*` and `Restrict*` set.
+
+Four options are left out on purpose. `ProtectProc`, `ProcSubset`,
+`PrivateUsers` and `PrivatePIDs` each hide or remap other processes. rootcheck
+finds a hidden process by comparison of `kill(pid, 0)` and `getsid(pid)`
+against `/proc/<pid>`. Any of those four makes the two views disagree for every
+process on the host, so rootcheck reports the whole process table as hidden
+processes. The agent does not fail. It produces findings that are not real.
+
+`ProtectHome` is `read-only` rather than `true`, because `true` replaces
+`/root` and `/home` with empty directories, and syscheck logs no error when it
+monitors an empty directory.
+
+To relax any of this for one daemon, set the option again:
+
+```nix
+systemd.services.wazuh-syscheckd.serviceConfig.ProtectHome = false;
+```
+
 ## Known limits
 
 - The build is not reproducible across Wazuh dependency versions. The
   `libbpf-bootstrap` CMake file ships in the dependency tarball, not in
   `wazuh/wazuh`, so it changes without a matching source tag. `prePatch` edits
   that file by structure and aborts the build if the structure changes.
-- `security.wrappers` marks all five daemons `setuid` and `setgid`. The daemons
-  already run as the `wazuh` user, so most of them do not need this.
 - The derivation sets `dontFixup = true`.
-- There is no NixOS VM test yet.
+- `SystemCallFilter`, `MemoryDenyWriteExecute`, `RestrictAddressFamilies` and
+  `PrivateDevices` are not set. Each one is plausible and none is tested. The
+  agent forks python wodles, loads an eBPF object in syscheckd, and reads
+  netlink from syscollector.

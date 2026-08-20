@@ -3,10 +3,12 @@
 #   nix build .#checks.x86_64-linux.agent
 #
 # Scope: this test proves that the module evaluates, that activation succeeds,
-# and that the generated ossec.conf is correct. It does not prove enrollment.
-# Enrollment needs a running Wazuh manager, and this repository packages only
-# the agent, so wazuh-agent-auth is expected to fail inside the test VM. For
-# that reason the test does not assert that the daemons stay running.
+# that the generated ossec.conf is correct, and that the four daemons which do
+# not need a manager stay running under the sandbox. It does not prove
+# enrollment. Enrollment needs a running Wazuh manager, and this repository
+# packages only the agent, so wazuh-agent-auth is expected to fail inside the
+# test VM, and wazuh-agentd is excluded from the start-up check for the same
+# reason.
 {
   pkgs,
   wazuhModule,
@@ -112,9 +114,48 @@ pkgs.testers.runNixOSTest {
         agent.succeed("test -d /var/ossec/etc")
         agent.succeed("test $(stat -c %U /var/ossec) = wazuh")
 
-    with subtest("every daemon has a unit and a wrapper"):
+    with subtest("no daemon is reachable through a setuid wrapper"):
         for daemon in daemons:
             agent.succeed(f"systemctl cat {daemon}.service >/dev/null")
-            agent.succeed(f"test -u /run/wrappers/bin/{daemon}")
+            # The wrapper was mode -r-s--s--x owned wazuh:wazuh, so any local
+            # user could execute the daemon as the account that owns
+            # etc/client.keys.
+            agent.fail(f"test -e /run/wrappers/bin/{daemon}")
+            agent.succeed(
+                f"systemctl show -p ExecStart --value {daemon}.service | grep -q /nix/store/"
+            )
+            agent.fail(
+                f"systemctl show -p ExecStart --value {daemon}.service | grep -q /run/wrappers/"
+            )
+
+    with subtest("the sandbox is applied"):
+        for daemon in daemons:
+            for prop, want in [("NoNewPrivileges", "yes"), ("ProtectSystem", "strict")]:
+                got = agent.succeed(
+                    f"systemctl show -p {prop} --value {daemon}.service"
+                ).strip()
+                assert got == want, f"{daemon}: {prop} is {got!r}, wanted {want!r}"
+            # Nothing calls setgroups any more, so no capability is needed.
+            agent.succeed(
+                f'test -z "$(systemctl show -p CapabilityBoundingSet --value {daemon}.service)"'
+            )
+
+    with subtest("the daemons still start under the sandbox"):
+        # These four reach "Started (pid: N)" without a manager. agentd is
+        # excluded: it needs a key, and enrollment cannot succeed in a VM that
+        # has no manager to enroll against.
+        unmanaged = [
+            "wazuh-logcollector",
+            "wazuh-syscheckd",
+            "wazuh-modulesd",
+            "wazuh-execd",
+        ]
+        for daemon in unmanaged:
+            agent.succeed(f"systemctl restart {daemon}.service")
+        # Type=exec reports active as soon as the binary is exec'd, so a daemon
+        # that dies during start-up would pass an immediate check.
+        agent.sleep(5)
+        for daemon in unmanaged:
+            agent.succeed(f"systemctl is-active {daemon}.service")
   '';
 }

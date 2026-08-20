@@ -100,8 +100,18 @@ let
 
     chown -R ${wazuhUser}:${wazuhGroup} ${stateDir}
 
-    find ${stateDir} -type d -exec chmod 770 {} \;
-    find ${stateDir} -type f -exec chmod 750 {} \;
+    find ${stateDir} -type d -exec chmod 750 {} +
+    find ${stateDir} -type f -exec chmod 640 {} +
+
+    # Only these four trees hold programs. The previous rule was a blanket
+    # chmod 750 over every file, which marked etc/client.keys, etc/ossec.conf
+    # and every other piece of data executable. Directories were 770, which
+    # made them group writable for no reason: the wazuh group has one member.
+    for dir in bin active-response/bin agentless wodles; do
+      if [ -d "${stateDir}/$dir" ]; then
+        find "${stateDir}/$dir" -type f -exec chmod 750 {} +
+      fi
+    done
 
     cp ${generatedConfig} ${stateDir}/etc/ossec.conf
 
@@ -118,6 +128,68 @@ let
     "wazuh-execd"
   ];
 
+  # Sandboxing shared by every unit in this module.
+  #
+  # Read the "deliberately absent" list at the bottom before adding to this.
+  # Several of the usual hardening options break what the agent is for, and one
+  # of them fails by reporting findings that are not real.
+  hardening = {
+    # The daemons no longer drop privileges themselves. The privsep patch in
+    # pkgs/patches makes Privsep_SetUser and Privsep_SetGroup return success
+    # without calling setuid or setgroups, because systemd has already put the
+    # process where it belongs. So there is nothing left that needs a
+    # capability, and CAP_SETGID can go.
+    CapabilityBoundingSet = [ "" ];
+    AmbientCapabilities = [ "" ];
+    NoNewPrivileges = true;
+
+    # /var/ossec is the only thing the agent writes.
+    ProtectSystem = "strict";
+    ReadWritePaths = [ stateDir ];
+
+    # read-only, not true. File integrity monitoring must still be able to read
+    # /root and /home, which syscheck.directories documents as a reasonable
+    # thing to add. ProtectHome = true replaces both with empty directories,
+    # and syscheck reports no error when it monitors an empty directory.
+    ProtectHome = "read-only";
+
+    PrivateTmp = true;
+    ProtectClock = true;
+    ProtectControlGroups = true;
+    ProtectHostname = true;
+    ProtectKernelLogs = true;
+    ProtectKernelModules = true;
+    ProtectKernelTunables = true;
+    RestrictNamespaces = true;
+    RestrictRealtime = true;
+    RestrictSUIDSGID = true;
+    LockPersonality = true;
+    RemoveIPC = true;
+    SystemCallArchitectures = "native";
+    UMask = "0027";
+  };
+
+  # Deliberately absent, and the reasons matter more than the list.
+  #
+  # ProtectProc, ProcSubset, PrivateUsers and PrivatePIDs all hide or remap
+  # other processes. rootcheck detects a hidden process by comparing two views
+  # of the same PID: kill(pid, 0) and getsid(pid) against stat, opendir and
+  # readdir on /proc/<pid>, in src/rootcheck/check_rc_pids.c. A disagreement is
+  # what it reports. Any of these options creates that disagreement for every
+  # process on the host, so the agent does not fail. It reports the whole
+  # process table as hidden processes. A hardening option that manufactures
+  # security findings is worse than no hardening option.
+  #
+  # ProtectHome = true would make /root and /home empty rather than
+  # unreadable, and syscheck logs no error when it monitors an empty
+  # directory. read-only above keeps those two usable as FIM targets.
+  #
+  # SystemCallFilter, MemoryDenyWriteExecute, RestrictAddressFamilies and
+  # PrivateDevices are all plausible here and none of them is verified. The
+  # agent forks python wodles, loads an eBPF object in syscheckd, and reaches
+  # netlink from syscollector. Each of those fails quietly in a different way.
+  # Add them one at a time against a running agent, not as a block.
+
   mkService = d: {
     description = d;
     wants = [ "wazuh-agent-auth.service" ];
@@ -131,18 +203,24 @@ let
       WAZUH_HOME = stateDir;
     };
 
-    serviceConfig = {
+    serviceConfig = hardening // {
       Type = "exec";
       User = wazuhUser;
       Group = wazuhGroup;
       WorkingDirectory = "${stateDir}/";
-      CapabilityBoundingSet = [ "CAP_SETGID" ];
 
+      # Straight from the store. These used to run through a setuid wrapper,
+      # which gave every local user a way to execute them as the wazuh user,
+      # the account that owns client.keys. The wrapper bought nothing: systemd
+      # already sets User and Group, and the w_homedir patch makes the daemons
+      # read WAZUH_HOME from the environment instead of resolving
+      # /proc/self/exe, which is the other reason a wrapper was once useful.
+      # agent-auth has always started from the store path this way.
       ExecStart =
         if d != "wazuh-modulesd" then
-          "/run/wrappers/bin/${d} -f -c ${stateDir}/etc/ossec.conf"
+          "${pkg}/bin/${d} -f -c ${stateDir}/etc/ossec.conf"
         else
-          "/run/wrappers/bin/${d} -f";
+          "${pkg}/bin/${d} -f";
     };
   };
 in
@@ -385,7 +463,8 @@ in
               touch ${stateDir}/.agent-registered
             '';
           in
-          {
+          hardening
+          // {
             Type = "oneshot";
             User = wazuhUser;
             Group = wazuhGroup;
@@ -406,7 +485,7 @@ in
           "wazuh.target"
         ];
         before = [ "wazuh-agent-auth.service" ] ++ map (d: "${d}.service") daemons;
-        serviceConfig = {
+        serviceConfig = hardening // {
           Type = "oneshot";
           User = wazuhUser;
           Group = wazuhGroup;
@@ -426,20 +505,17 @@ in
       };
     };
 
-    # TODO: narrow this. The daemons already run as the wazuh user, so setuid
-    # and setgid to that same user buys little. Confirm against a running agent
-    # before changing it.
-    security.wrappers = listToAttrs (
-      map (
-        d:
-        nameValuePair d {
-          setgid = true;
-          setuid = true;
-          owner = wazuhUser;
-          group = wazuhGroup;
-          source = "${pkg}/bin/${d}";
-        }
-      ) daemons
-    );
+    # security.wrappers is deliberately not used here.
+    #
+    # It built a setuid and setgid wrapper per daemon, owned wazuh:wazuh, at
+    # mode -r-s--s--x. The trailing x is world execute, so every local user
+    # could run those binaries as the wazuh user, which owns /var/ossec and
+    # therefore etc/client.keys, the agent's shared secret with the manager.
+    #
+    # The wrappers bought nothing in return. systemd already sets User and
+    # Group, the privsep patch removed the privilege drop that a wrapper would
+    # have served, and the w_homedir patch made the daemons read WAZUH_HOME
+    # from the environment rather than resolving /proc/self/exe. ExecStart now
+    # names the store path directly, which is how agent-auth has always run.
   };
 }
