@@ -233,6 +233,11 @@ against `authd`, that the manager records the enrollment in its own
 `client.keys`, that the agent connects to `remoted`, and that an event written
 on the agent reaches the manager's archive.
 
+Expect about six minutes. Most of that is the manager: the unit loads a
+multi-gigabyte image, and the manager then initializes its databases before it
+opens port 1515. The test starts the manager first and boots the agent only
+after those ports are open, so the console stays quiet during the wait.
+
 The manager image is not pinned in this repository, because a manifest digest
 and a hash cannot be guessed. Write the pin first:
 

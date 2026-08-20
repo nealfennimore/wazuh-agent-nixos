@@ -77,7 +77,13 @@ pkgs.testers.runNixOSTest {
             # fall back to pulling it, and this VM has no route to a registry.
             # That failure is worth separating from a manager that is merely
             # slow to start.
-            manager.succeed("docker ps | grep -q wazuh-manager")
+            #
+            # Wait rather than assert. The docker backend leaves Type at
+            # simple, so the unit reports active the moment `docker run` is
+            # exec'd, which is before the container appears in `docker ps`.
+            manager.wait_until_succeeds(
+                "docker ps | grep -q wazuh-manager", timeout=120
+            )
 
             # The image starts the daemons from cont-init.d/2-manager, which
             # ends in `wazuh-control start`. That runs after the container is
