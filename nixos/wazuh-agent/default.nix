@@ -9,6 +9,7 @@ let
   wazuhUser = "wazuh";
   wazuhGroup = wazuhUser;
   stateDir = "/var/ossec";
+  enrollmentPasswordCredential = "wazuh-agent-auth-password";
   cfg = config.services.wazuh-agent;
   pkg = cfg.package;
 
@@ -138,7 +139,12 @@ let
     cp ${generatedConfig} ${stateDir}/etc/ossec.conf
 
     ${optionalString (cfg.agentAuthPasswordFile != null) ''
-      install -m 0640 ${cfg.agentAuthPasswordFile} ${stateDir}/etc/authd.pass
+      # PID 1 reads the configured source before this service changes to the
+      # wazuh user. This supports the 0400 root-owned files that secret
+      # managers create without weakening the source file's ownership or mode.
+      install -m 0640 \
+        "$CREDENTIALS_DIRECTORY/${enrollmentPasswordCredential}" \
+        ${stateDir}/etc/authd.pass
     ''}
   '';
 
@@ -620,7 +626,9 @@ in
       example = "/run/secrets/wazuh-authd-pass";
       description = ''
         Path to a file holding the enrollment password. Use a path outside the
-        Nix store. Anything in the store is world readable.
+        Nix store. Anything in the store is world readable. The source may be
+        readable only by root; systemd passes it to the setup service as a
+        credential before that service changes to the wazuh user.
       '';
     };
   };
@@ -760,6 +768,9 @@ in
           Type = "oneshot";
           User = wazuhUser;
           Group = wazuhGroup;
+          LoadCredential = optional (cfg.agentAuthPasswordFile != null) (
+            "${enrollmentPasswordCredential}:${toString cfg.agentAuthPasswordFile}"
+          );
           ExecStart =
             let
               script = pkgs.writeShellApplication {

@@ -129,7 +129,9 @@ sudo systemctl restart wazuh.target
 | `path` | see module | Packages on the PATH of the daemons. |
 
 Do not put the enrollment password in the Nix store. The store is world
-readable. Point `agentAuthPasswordFile` at a path outside the store.
+readable. Point `agentAuthPasswordFile` at a path outside the store. Root-only
+sources created by sops-nix, agenix, or another secret manager are supported;
+systemd reads the source and delivers it to the setup service as a credential.
 
 `config` and `extraConfig` conflict. An assertion rejects both together.
 

@@ -28,7 +28,15 @@ pkgs.testers.runNixOSTest {
         enable = true;
         manager.host = "192.0.2.10";
         manager.port = 1514;
+        agentAuthPasswordFile = "/run/secrets/wazuh-authd-pass";
       };
+
+      # Match the default ownership and mode used by sops-nix and agenix.
+      # setup-pre-wazuh runs as wazuh, so opening this path directly must fail;
+      # PID 1 has to provide it through LoadCredential instead.
+      systemd.tmpfiles.rules = [
+        "f /run/secrets/wazuh-authd-pass 0400 root root - test-enrollment-password"
+      ];
 
       # The journald subtest reads a counter out of the logcollector state
       # file, which is JSON.
@@ -150,6 +158,14 @@ pkgs.testers.runNixOSTest {
     with subtest("the state directory belongs to the wazuh user"):
         agent.succeed("test -d /var/ossec/etc")
         agent.succeed("test $(stat -c %U /var/ossec) = wazuh")
+
+    with subtest("a root-only enrollment password is delivered as a credential"):
+        agent.succeed("test $(stat -c %U:%G /run/secrets/wazuh-authd-pass) = root:root")
+        agent.succeed("test $(stat -c %a /run/secrets/wazuh-authd-pass) = 400")
+        agent.fail("runuser -u wazuh -- cat /run/secrets/wazuh-authd-pass")
+        agent.succeed("grep -qx test-enrollment-password /var/ossec/etc/authd.pass")
+        agent.succeed("test $(stat -c %U:%G /var/ossec/etc/authd.pass) = wazuh:wazuh")
+        agent.succeed("test $(stat -c %a /var/ossec/etc/authd.pass) = 640")
 
     with subtest("no daemon is reachable through a setuid wrapper"):
         for daemon in daemons:

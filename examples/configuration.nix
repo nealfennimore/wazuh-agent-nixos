@@ -20,6 +20,8 @@
     # Write this value as a quoted string, not as a bare path. A bare path
     # such as /run/secrets/wazuh-authd-pass is a Nix path literal, and Nix
     # copies a path literal into the store. The store is world readable.
+    # A quoted root-only path works: systemd delivers it to the setup service
+    # as a credential before the service changes to the wazuh user.
     #
     # agentAuthPasswordFile = "/run/secrets/wazuh-authd-pass";
 
