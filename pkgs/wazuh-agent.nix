@@ -140,7 +140,7 @@ stdenv.mkDerivation {
     ./patches/01-link-libdb-for-agent.patch
     ./patches/02-build-openssl-with-perl.patch
     ./patches/03-use-wazuh-home.patch
-    ./patches/04-systemd-owns-supplementary-groups.patch
+    ./patches/04-systemd-owns-privilege-drop.patch
   ];
 
   # GCC 13 and later reject the incompatible pointer types in the vendored

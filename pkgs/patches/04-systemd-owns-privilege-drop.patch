@@ -1,8 +1,23 @@
 diff --git a/src/shared/privsep_op.c b/src/shared/privsep_op.c
-index e7e0391..f1cc50f 100644
+index e7e0391..b74f3a0 100644
 --- a/src/shared/privsep_op.c
 +++ b/src/shared/privsep_op.c
-@@ -147,20 +147,7 @@ int Privsep_SetUser(uid_t uid)
+@@ -133,33 +133,11 @@ gid_t Privsep_GetGroup(const char *name)
+ int Privsep_SetUser(uid_t uid)
+ {
+-    if (setuid(uid) < 0) {
+-        return (OS_INVALID);
+-    }
+-
+-#ifndef HPUX
+-    if (seteuid(uid) < 0) {
+-        return (OS_INVALID);
+-    }
+-#endif
+-
++    (void)uid;
+     return (OS_SUCCESS);
+ }
  
  int Privsep_SetGroup(gid_t gid)
  {
@@ -23,4 +38,3 @@ index e7e0391..f1cc50f 100644
 +    (void)gid;
      return (OS_SUCCESS);
  }
- 
