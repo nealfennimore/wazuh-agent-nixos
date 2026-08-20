@@ -113,6 +113,9 @@ sudo systemctl restart wazuh.target
 | `manager.port` | `1514` | The agent traffic port on the manager. |
 | `registration.host` | `null` | A separate enrollment server. `null` means the manager. |
 | `registration.port` | `1515` | The enrollment port. Used even when `registration.host` is `null`. |
+| `registration.caFile` | `null` | CA that the manager is verified against. `null` means no verification. |
+| `registration.certFile` | `null` | Client certificate this agent presents. Needs `keyFile` and `caFile`. |
+| `registration.keyFile` | `null` | Private key for `certFile`. Keep it outside the store. |
 | `agentAuthPasswordFile` | `null` | A file that holds the enrollment password. |
 | `syscheck.directories` | `[ "/etc" "/boot" ]` | Directories that file integrity monitoring watches. |
 | `syscheck.ignore` | the two systemd credential stores | Paths excluded from monitoring. |
@@ -172,9 +175,63 @@ inactive forever.
 services.wazuh-agent.activeResponse.enable = true;
 ```
 
-This grants `wazuh-execd` `CAP_NET_ADMIN`, puts `iptables` on its `PATH`, and
-enables the block in `ossec.conf`. Weigh that against the rest of this module.
-It is the only capability any unit holds.
+This grants `wazuh-execd` `CAP_NET_ADMIN`, puts `iptables` and `curl` on its
+`PATH`, and enables the block in `ossec.conf`. Weigh that against the rest of
+this module. It is the only capability any unit holds.
+
+Three of the scripts the package ships for Linux work under this sandbox.
+
+| Script | Needs | Supplied by |
+|--------|-------|-------------|
+| `firewall-drop` | `iptables`, `ip6tables`, `CAP_NET_ADMIN` | the option |
+| `route-null` | `route`, `CAP_NET_ADMIN` | `nettools`, already in `path` |
+| `wazuh-slack` | `curl` or `wget`, no capability | the option |
+
+The rest do not, and the reasons do not change with configuration.
+
+| Script | Why not |
+|--------|---------|
+| `disable-account` | Runs `passwd`, a setuid wrapper on NixOS. `NoNewPrivileges` blocks setuid. |
+| `host-deny` | Writes `/etc/hosts.deny`. `ProtectSystem = "strict"` makes it read-only. |
+| `firewalld-drop` | Needs `firewalld` running and reachable over D-Bus. |
+| `restart-wazuh`, `restart.sh` | Restart through `wazuh-control`, which fights systemd. |
+| `ipfw`, `npf`, `pf` | BSD firewalls. |
+| `kaspersky` | Needs the Kaspersky Endpoint Security CLI. |
+
+Each script resolves its binary with a `PATH` lookup, and a miss is written to
+`logs/active-responses.log` rather than to the journal. `logcollector` reads
+that file, so the manager sees it. The agent's own journal does not.
+
+### Verify the manager during enrollment
+
+Enrollment does not verify the manager unless a CA is configured. Without one
+the client context keeps the OpenSSL default, `SSL_VERIFY_NONE`, so the
+handshake completes against any certificate. The agent records this at
+`mdebug1`, which does not print at the default log level.
+
+```nix
+services.wazuh-agent.registration.caFile = "/var/lib/wazuh-certs/root-ca.pem";
+```
+
+This covers both enrollment paths, which matters because there are two. The
+`agent-auth` unit runs once and gets `-v`. `wazuh-agentd` enrolls itself from
+the `<enrollment>` block on every boot and gets `server_ca_path`. Configuring
+one and not the other leaves the path that runs more often unverified.
+
+Verification checks the chain, then matches the subject alternative names, and
+failing that the common name, against the address the agent connects to. So
+the manager's certificate must name `manager.host`, or `registration.host`
+when that is set. A manager using the certificate it generates for itself does
+not pass. That is a manager-side change, not an agent one.
+
+`registration.certFile` and `registration.keyFile` add a client certificate.
+Set them together, and set `caFile` as well: a client certificate proves the
+agent to the manager and does not make the agent check the manager. An
+assertion rejects both mistakes. The manager verifies a client certificate
+only when its own `ssl_agent_ca` is set.
+
+Put the key outside the Nix store. Nothing copies these files, so their own
+permissions are what matter, and the `wazuh` user must be able to read them.
 
 ### File integrity monitoring on NixOS
 

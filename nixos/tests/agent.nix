@@ -35,11 +35,13 @@ pkgs.testers.runNixOSTest {
       environment.systemPackages = [ pkgs.jq ];
     };
 
-  # The same module with active response on, so one run covers both settings.
-  # This node asserts configuration and capabilities only. Firing a response
-  # needs a manager to send one.
+  # The same module with the opt-in settings on, so one run covers both sides
+  # of each. This node asserts configuration, capabilities and command lines.
+  # Firing a response needs a manager to send one, and proving that
+  # certificate verification works needs a manager holding a matching
+  # certificate, which is checks.enrollment's ground rather than this one.
   nodes.responder =
-    { ... }:
+    { pkgs, ... }:
     {
       imports = [ wazuhModule ];
 
@@ -48,6 +50,13 @@ pkgs.testers.runNixOSTest {
         manager.host = "192.0.2.10";
         manager.port = 1514;
         activeResponse.enable = true;
+
+        # Contents do not matter here. Nothing reads them without a manager,
+        # and what this node checks is that the paths reach both enrollment
+        # paths. A real key does not belong in the store.
+        registration.caFile = pkgs.writeText "test-root-ca.pem" "";
+        registration.certFile = pkgs.writeText "test-agent.pem" "";
+        registration.keyFile = pkgs.writeText "test-agent-key.pem" "";
       };
     };
 
@@ -361,7 +370,10 @@ pkgs.testers.runNixOSTest {
             ).strip()
             assert got == "", f"{daemon} holds {got!r}, only execd should"
 
-        # firewall-drop resolves "iptables" through the PATH and execs it.
+        # Every active response resolves its binary through get_binary_path,
+        # which is a PATH lookup, and a miss goes to active-responses.log
+        # rather than the journal. These are the three that can work under
+        # this sandbox, so all three binaries must resolve.
         env = responder.succeed(
             "systemctl show -p Environment --value wazuh-execd.service"
         ).strip()
@@ -374,6 +386,35 @@ pkgs.testers.runNixOSTest {
             f"env -i PATH={execd_path} /bin/sh -c 'command -v iptables'"
             " >/dev/null"
         )
+
+    with subtest("enrollment is unverified unless a CA is configured"):
+        # Off by default, and the absence must be an absent block rather than
+        # an empty one, which would read as configured.
+        agent.fail("grep -q '<enrollment>' /var/ossec/etc/ossec.conf")
+        execstart = agent.succeed(
+            "systemctl show -p ExecStart --value wazuh-agent-auth.service"
+        )
+        for flag in [" -v ", " -x ", " -k "]:
+            assert flag not in execstart, f"agent-auth has {flag!r}: {execstart}"
+
+    with subtest("a configured CA reaches both enrollment paths"):
+        # There are two. agent-auth runs once, and wazuh-agentd enrolls itself
+        # on every boot from the <enrollment> block. Configuring one and not
+        # the other leaves the path that runs more often unverified.
+        conf = responder.succeed("cat /var/ossec/etc/ossec.conf")
+        assert "<enrollment>" in conf, "no enrollment block on the responder"
+        for element in [
+            "server_ca_path",
+            "agent_certificate_path",
+            "agent_key_path",
+        ]:
+            assert f"<{element}>" in conf, f"{element} missing from ossec.conf"
+
+        execstart = responder.succeed(
+            "systemctl show -p ExecStart --value wazuh-agent-auth.service"
+        )
+        for flag in ["-v", "-x", "-k"]:
+            assert f" {flag} " in execstart, f"agent-auth lacks {flag}: {execstart}"
 
     with subtest("the wazuh user can read the login records"):
         # last -n 5 reads /var/log/wtmp. systemd creates the file from its own

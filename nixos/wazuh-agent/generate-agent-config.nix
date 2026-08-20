@@ -95,6 +95,35 @@ let
     <address>${cfg.manager.host}</address>
           <port>${toString cfg.manager.port}</port>'';
 
+  # Certificate verification for the enrollment that wazuh-agentd performs
+  # itself, which is a different code path from the agent-auth unit and the
+  # one that runs on every boot. Both need the same files, and configuring
+  # only agent-auth would leave the daemon enrolling unverified.
+  #
+  # Element names are config/client-config.c:391-393. The block goes inside
+  # <client>, so anchor on the one </server> in the template.
+  enrollmentPaths =
+    lib.optional (cfg.registration.caFile != null)
+      "<server_ca_path>${cfg.registration.caFile}</server_ca_path>"
+    ++ lib.optional (cfg.registration.certFile != null)
+      "<agent_certificate_path>${cfg.registration.certFile}</agent_certificate_path>"
+    ++ lib.optional (cfg.registration.keyFile != null)
+      "<agent_key_path>${cfg.registration.keyFile}</agent_key_path>";
+
+  serverClose = "</server>";
+
+  # Replacing </server> with itself when nothing is configured keeps the
+  # --replace-fail below unconditional, so the pattern is still checked.
+  serverCloseAndEnrollment =
+    if enrollmentPaths == [ ] then
+      serverClose
+    else
+      ''
+        </server>
+            <enrollment>
+              ${lib.concatStringsSep "\n          " enrollmentPaths}
+            </enrollment>'';
+
   yesNo = b: if b then "yes" else "no";
 
   # ossec-agent.conf ships no <sca> block, so the module never ran here.
@@ -141,7 +170,9 @@ pkgs.runCommand "ossec.conf"
       --replace-fail ${lib.escapeShellArg lastUpstreamIgnore} \
                      ${lib.escapeShellArg ignoreLines} \
       --replace-fail ${lib.escapeShellArg activeResponseBlock} \
-                     ${lib.escapeShellArg activeResponseReplacement}
+                     ${lib.escapeShellArg activeResponseReplacement} \
+      --replace-fail ${lib.escapeShellArg serverClose} \
+                     ${lib.escapeShellArg serverCloseAndEnrollment}
 
     # The active response reader must survive as a plain file reader.
     grep -q '<location>/var/ossec/logs/active-responses.log</location>' ossec.conf
@@ -153,6 +184,12 @@ pkgs.runCommand "ossec.conf"
     test "$(grep -c '<active-response>' ossec.conf)" -eq 1
     grep -A1 '<active-response>' ossec.conf \
       | grep -q '<disabled>${yesNo (!cfg.activeResponse.enable)}</disabled>'
+
+    # Enrollment verification is opt in, so assert both directions. An empty
+    # <enrollment> block would be worse than none: it reads as configured.
+    test "$(grep -c '<enrollment>' ossec.conf)" -eq ${
+      if enrollmentPaths == [ ] then "0" else "1"
+    }
 
     # No FHS binary directory may survive the replacement above.
     if grep -qE '<directories>[^<]*/(usr/)?s?bin' ossec.conf; then

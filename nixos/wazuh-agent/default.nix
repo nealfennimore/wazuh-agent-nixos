@@ -244,19 +244,41 @@ let
   # PrivateDevices are no longer in this list. They are applied above, and the
   # note there says what tests them.
 
-  # Active response needs one capability and one binary, and only execd needs
-  # them. firewall-drop resolves "iptables" through the PATH
-  # (src/active-response/firewalls/default-firewall-drop.c:89) and execs it to
-  # add INPUT and FORWARD DROP rules, which is CAP_NET_ADMIN.
+  # Active response needs one capability, and only execd needs it. Each script
+  # resolves its binary through get_binary_path, which is a PATH lookup, and a
+  # miss is written to logs/active-responses.log rather than to the journal.
   #
-  # This does not make every active response work. host-deny writes
-  # /etc/hosts.deny and disable-account runs passwd, and ProtectSystem =
-  # "strict" and the absence of root stop both. Firewall responses are what
-  # this grant covers.
+  # Of the scripts the package ships for Linux, three can work here:
+  #
+  #   firewall-drop  iptables and ip6tables, CAP_NET_ADMIN
+  #                  (firewalls/default-firewall-drop.c:89)
+  #   route-null     route, CAP_NET_ADMIN. Note route and not ip, so this
+  #                  comes from nettools, already in the path default
+  #                  (route-null.c:67)
+  #   wazuh-slack    curl or wget, and no capability at all
+  #                  (wazuh-slack.c:79,105)
+  #
+  # The rest cannot, and the reasons are worth keeping:
+  #
+  #   disable-account  runs passwd, which on NixOS is a setuid wrapper, and
+  #                    NoNewPrivileges blocks setuid outright
+  #   host-deny        writes /etc/hosts.deny, which ProtectSystem = "strict"
+  #                    makes read-only
+  #   firewalld-drop   needs firewalld running and reachable over D-Bus
+  #   restart-wazuh    restarts through wazuh-control, which fights systemd
+  #   ipfw, npf, pf    BSD firewalls
   execdHardening = {
     CapabilityBoundingSet = [ "CAP_NET_ADMIN" ];
     AmbientCapabilities = [ "CAP_NET_ADMIN" ];
   };
+
+  # iptables covers firewall-drop, and supplies ip6tables with it. curl covers
+  # wazuh-slack, which needs no capability and would otherwise fail for want
+  # of a binary. route comes from nettools in the path default.
+  execdPackages = [
+    pkgs.iptables
+    pkgs.curl
+  ];
 
   mkService = d: {
     description = d;
@@ -275,7 +297,7 @@ let
     # resolving.
     path =
       cfg.path
-      ++ optional (d == "wazuh-execd" && cfg.activeResponse.enable) pkgs.iptables
+      ++ optionals (d == "wazuh-execd" && cfg.activeResponse.enable) execdPackages
       ++ [
         "/run/current-system/sw"
         "/run/wrappers"
@@ -365,6 +387,66 @@ in
             '';
             example = 1515;
             default = 1515;
+          };
+
+          caFile = mkOption {
+            type = types.nullOr types.path;
+            default = null;
+            example = "/var/lib/wazuh-certs/root-ca.pem";
+            description = ''
+              A CA certificate that the manager is verified against during
+              enrollment.
+
+              The default is null, which means no verification at all. Without
+              a CA the client context keeps the OpenSSL default, which is
+              SSL_VERIFY_NONE, because os_auth/ssl.c calls SSL_CTX_set_verify
+              only when a CA is supplied. The handshake then completes against
+              any certificate, including a self-signed one from an impostor.
+              The agent says so at mdebug1, which does not print at the
+              default log level.
+
+              Setting this turns verification on for both enrollment paths:
+              the agent-auth unit gets -v, and the enrollment that
+              wazuh-agentd performs itself gets server_ca_path.
+
+              Verification checks the certificate chain and then matches the
+              subject alternative names, and failing that the common name,
+              against the address the agent connects to. So the manager's
+              certificate must name manager.host, or registration.host when
+              that is set. A manager using the certificate it generates for
+              itself will not pass.
+
+              The file must be readable by the wazuh user. It is a public
+              certificate, so the Nix store is a reasonable place for it.
+            '';
+          };
+
+          certFile = mkOption {
+            type = types.nullOr types.path;
+            default = null;
+            example = "/var/lib/wazuh-certs/agent.pem";
+            description = ''
+              A client certificate that this agent presents during enrollment.
+              Set it together with keyFile.
+
+              The manager must also be configured for this. authd verifies a
+              client certificate only when its own ssl_agent_ca is set.
+            '';
+          };
+
+          keyFile = mkOption {
+            type = types.nullOr types.path;
+            default = null;
+            example = "/run/secrets/wazuh-agent-key";
+            description = ''
+              The private key for certFile.
+
+              Use a path outside the Nix store. Anything in the store is world
+              readable. The file must be readable by the wazuh user, because
+              wazuh-agentd and agent-auth both open it directly. Unlike
+              agentAuthPasswordFile nothing copies it, so its own permissions
+              are what matter.
+            '';
           };
         };
       };
@@ -552,6 +634,25 @@ in
           services.wazuh-agent.config is set. config replaces the whole file.
         '';
       }
+      {
+        assertion = (cfg.registration.certFile == null) == (cfg.registration.keyFile == null);
+        message = ''
+          services.wazuh-agent.registration.certFile and
+          services.wazuh-agent.registration.keyFile must be set together. A
+          client certificate without its key cannot complete a handshake.
+        '';
+      }
+      {
+        assertion = cfg.registration.certFile == null || cfg.registration.caFile != null;
+        message = ''
+          services.wazuh-agent.registration.certFile is set but
+          services.wazuh-agent.registration.caFile is not.
+
+          A client certificate proves this agent to the manager. It does not
+          make the agent check the manager, so enrollment would still accept
+          any certificate the other side presents. Set caFile as well.
+        '';
+      }
     ];
 
     users.users.${wazuhUser} = {
@@ -610,6 +711,14 @@ in
             # misleading "Connection refused by the manager".
             host = if cfg.registration.host != null then cfg.registration.host else cfg.manager.host;
 
+            # -v, -x and -k are os_auth/main-client.c:184-200. Without -v the
+            # SSL context keeps SSL_VERIFY_NONE, so any certificate passes.
+            certFlags = concatStringsSep " " (
+              optional (cfg.registration.caFile != null) "-v ${cfg.registration.caFile}"
+              ++ optional (cfg.registration.certFile != null) "-x ${cfg.registration.certFile}"
+              ++ optional (cfg.registration.keyFile != null) "-k ${cfg.registration.keyFile}"
+            );
+
             # Record the enrollment only when it produced a key. agent-auth
             # can report a failure and still exit 0, and ExecStartPost runs
             # on exit 0, so an unconditional touch marks a failed enrollment
@@ -628,7 +737,9 @@ in
             Type = "oneshot";
             User = wazuhUser;
             Group = wazuhGroup;
-            ExecStart = "${pkg}/bin/agent-auth -m ${host} -p ${toString cfg.registration.port}";
+            ExecStart =
+              "${pkg}/bin/agent-auth -m ${host} -p ${toString cfg.registration.port}"
+              + optionalString (certFlags != "") " ${certFlags}";
             ExecStartPost = "${markRegistered}";
           };
       };
