@@ -1,0 +1,7 @@
+{
+  "imageName": "wazuh/wazuh-manager",
+  "imageDigest": "sha256:8665c9807a5765253c79e4b072a1b7462c997bd69be949118a8d82ce44dd33e9",
+  "hash": "sha256-F1lBk+YuhXNZFphzD/QC7/mCzJLOCxuGqXtzGWn2msY=",
+  "finalImageName": "wazuh/wazuh-manager",
+  "finalImageTag": "4.14.7"
+}
