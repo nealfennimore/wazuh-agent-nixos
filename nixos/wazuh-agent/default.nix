@@ -373,6 +373,53 @@ in
       };
     };
 
+    sca = mkOption {
+      description = ''
+        Security Configuration Assessment.
+
+        The ossec-agent.conf that ships in the package has no sca block, so
+        this module never ran before. Upstream writes that block from
+        etc/templates/config/generic/sca.template into the ossec.conf that
+        install.sh generates, which is a different file.
+
+        SCA is the module that replaces the deprecated rootcheck system_audit
+        check. wazuh-syscheckd logs that deprecation on every start.
+
+        Policies come from the package, at ruleset/sca. Upstream installs the
+        set that matches the distribution and falls back to
+        sca_distro_independent_linux.yml, which is what NixOS gets.
+      '';
+      default = { };
+      type = types.submodule {
+        options = {
+          enable = mkOption {
+            type = types.bool;
+            default = true;
+            description = "Whether to run configuration assessment scans.";
+          };
+
+          scanOnStart = mkOption {
+            type = types.bool;
+            default = true;
+            description = "Whether to scan when the agent starts.";
+          };
+
+          interval = mkOption {
+            type = types.nonEmptyStr;
+            default = "12h";
+            example = "1d";
+            description = "Time between scans.";
+          };
+
+          skipNfs = mkOption {
+            type = types.bool;
+            default = true;
+            description = "Whether to skip NFS mounts during a scan.";
+          };
+        };
+      };
+    };
+
     config = mkOption {
       type = types.nullOr types.nonEmptyStr;
       default = null;

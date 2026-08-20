@@ -116,6 +116,10 @@ sudo systemctl restart wazuh.target
 | `agentAuthPasswordFile` | `null` | A file that holds the enrollment password. |
 | `syscheck.directories` | `[ "/etc" "/boot" ]` | Directories that file integrity monitoring watches. |
 | `syscheck.ignore` | the two systemd credential stores | Paths excluded from monitoring. |
+| `sca.enable` | `true` | Runs Security Configuration Assessment scans. |
+| `sca.scanOnStart` | `true` | Scans when the agent starts. |
+| `sca.interval` | `"12h"` | Time between scans. |
+| `sca.skipNfs` | `true` | Skips NFS mounts during a scan. |
 | `extraConfig` | `""` | XML appended to the generated `ossec.conf`. |
 | `config` | `null` | The complete `ossec.conf`. Replaces the generated file. |
 | `path` | see module | Packages on the PATH of the daemons. |
@@ -124,6 +128,30 @@ Do not put the enrollment password in the Nix store. The store is world
 readable. Point `agentAuthPasswordFile` at a path outside the store.
 
 `config` and `extraConfig` conflict. An assertion rejects both together.
+
+### Configuration assessment
+
+The `ossec-agent.conf` that ships in the package has no `<sca>` block.
+Upstream writes that block into the `ossec.conf` that `install.sh` generates,
+from `etc/templates/config/generic/sca.template`. This module builds from
+`ossec-agent.conf` instead, so Security Configuration Assessment never ran.
+This module appends the block itself.
+
+SCA replaces the deprecated rootcheck `system_audit` check. That deprecation
+is the warning `wazuh-syscheckd` logs on every start:
+
+```
+WARNING: The check_unixaudit option is deprecated in favor of the SCA module.
+```
+
+Keep the `<system_audit>` entries. The manager pushes those policy files into
+`etc/shared`, and rootcheck reads them. The warning names a replacement, not a
+fault.
+
+Policies come from the package at `ruleset/sca`. Upstream installs the set
+that matches the distribution and falls back to
+`sca_distro_independent_linux.yml`, which is what NixOS gets. `preStart`
+copies that directory into `/var/ossec`.
 
 ### File integrity monitoring on NixOS
 

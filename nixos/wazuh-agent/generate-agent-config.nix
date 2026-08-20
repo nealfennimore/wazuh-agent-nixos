@@ -81,11 +81,40 @@ let
   serverAddressAndPort = ''
     <address>${cfg.manager.host}</address>
           <port>${toString cfg.manager.port}</port>'';
+
+  yesNo = b: if b then "yes" else "no";
+
+  # ossec-agent.conf ships no <sca> block, so the module never ran here.
+  # install.sh writes one into the ossec.conf that it generates, from
+  # etc/templates/config/generic/sca.template, but this file builds from
+  # ossec-agent.conf instead. These are that template's five elements, with
+  # the values behind options.
+  #
+  # No <policies> element. wmodules-sca.c:104 loads every policy in
+  # ruleset/sca when none is named, and preStart copies that directory.
+  #
+  # The block is always written, and <enabled> carries the decision. Leaving
+  # it out would fall back to whatever the module compiles in, which is not
+  # something this module can state.
+  scaSection = ''
+    <ossec_config>
+      <sca>
+        <enabled>${yesNo cfg.sca.enable}</enabled>
+        <scan_on_start>${yesNo cfg.sca.scanOnStart}</scan_on_start>
+        <interval>${cfg.sca.interval}</interval>
+        <skip_nfs>${yesNo cfg.sca.skipNfs}</skip_nfs>
+      </sca>
+    </ossec_config>
+  '';
 in
 pkgs.runCommand "ossec.conf"
   {
     inherit (cfg) extraConfig;
-    passAsFile = [ "extraConfig" ];
+    inherit scaSection;
+    passAsFile = [
+      "extraConfig"
+      "scaSection"
+    ];
     template = "${cfg.package}/share/wazuh-agent/ossec-agent.conf";
   }
   ''
@@ -110,6 +139,15 @@ pkgs.runCommand "ossec.conf"
       exit 1
     fi
 
-    # Wazuh accepts more than one ossec_config root tag, so extraConfig appends.
-    cat ossec.conf "$extraConfigPath" > $out
+    # The template must not already carry an sca block, or the agent would get
+    # two and the second would win silently.
+    if grep -q '<sca>' ossec.conf; then
+      echo "generate-agent-config: the template now ships its own <sca> block." >&2
+      echo "Drop scaSection here rather than append a second one." >&2
+      exit 1
+    fi
+
+    # Wazuh accepts more than one ossec_config root tag, so both of these
+    # append as their own root.
+    cat ossec.conf "$scaSectionPath" "$extraConfigPath" > $out
   ''

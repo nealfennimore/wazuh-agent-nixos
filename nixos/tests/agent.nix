@@ -157,5 +157,21 @@ pkgs.testers.runNixOSTest {
         agent.sleep(5)
         for daemon in unmanaged:
             agent.succeed(f"systemctl is-active {daemon}.service")
+
+    with subtest("configuration assessment is configured and has policies"):
+        # The shipped ossec-agent.conf has no sca block. install.sh writes one
+        # into a different file, so this module never ran before.
+        agent.succeed("test $(grep -c '<sca>' /var/ossec/etc/ossec.conf) -eq 1")
+
+        # wmodules-sca.c loads every policy in ruleset/sca when none is named,
+        # and preStart never copied that directory before.
+        agent.succeed("test -d /var/ossec/ruleset/sca")
+        agent.succeed("ls /var/ossec/ruleset/sca/*.yml >/dev/null")
+
+        # This is what modulesd logs when the directory is missing.
+        agent.fail(
+            "journalctl -u wazuh-modulesd"
+            " | grep -q 'Could not open the default SCA ruleset folder'"
+        )
   '';
 }
