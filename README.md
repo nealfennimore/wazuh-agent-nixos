@@ -194,6 +194,8 @@ services.wazuh-agent.activeResponse = {
 | `route-null` | `route` from `nettools`, `CAP_NET_ADMIN` | on |
 | `wazuh-slack` | `curl`, no capability | on |
 | `host-deny` | `/etc/hosts.deny` writable by the `wazuh` user | off |
+| `firewalld-drop` | `firewall-cmd`, and a polkit rule | follows `services.firewalld.enable` |
+| `disable-account` | `wazuh-execd` running as **root** | off |
 
 `host-deny` is off by default because the grant is a different shape. The path
 is hardcoded, `ProtectSystem = "strict"` makes `/etc` read-only, and the file
@@ -202,9 +204,25 @@ is normally owned by root. Enabling it adds `/etc/hosts.deny` to
 `wazuh` user. Little reads that file on a modern NixOS host, so enable it only
 if something on yours does.
 
-`CAP_NET_ADMIN` is the only capability any unit in this module holds, and only
-`wazuh-execd` holds it. Turn off `firewall-drop` and `route-null` and no unit
-holds a capability at all.
+`firewalld-drop` follows `services.firewalld.enable`, so it needs no attention
+when firewalld is on or off. The binary comes with the firewalld package
+already. What it adds is a polkit rule letting the `wazuh` user call
+`org.fedoraproject.FirewallD1.all`. That action id is every runtime change
+firewalld accepts, because firewalld does not split runtime authorization more
+finely. Permanent changes are a separate action and stay denied.
+
+`disable-account` runs `wazuh-execd` as **root**, and no capability
+substitutes. `shadow` reads the real UID (`passwd.c:71,767`), so neither a
+capability nor a setuid wrapper reaches it. The module warns at evaluation when
+this is on, because `wazuh-execd` is the unit that runs what the manager tells
+it to run: a compromised or impersonated manager reaches root through it. Set
+`registration.caFile` if you enable this. The group stays `wazuh` so that
+`logs/active-responses.log` remains readable by `wazuh-logcollector`, which is
+how the manager learns a response ran.
+
+Apart from `disable-account`, `CAP_NET_ADMIN` is the only capability any unit
+in this module holds, and only `wazuh-execd` holds it. Turn off
+`firewall-drop` and `route-null` and no unit holds a capability at all.
 
 **These options do not restrict the manager.** Every script the package ships
 stays in `active-response/bin`, and the manager decides which to invoke. They
@@ -449,7 +467,8 @@ systemd.services.wazuh-syscheckd.serviceConfig.ProtectHome = false;
 - File integrity monitoring runs in scheduled mode. `whodata` mode loads an
   eBPF object, and `bpf` is in `@privileged` rather than `@system-service`, so
   it needs a `SystemCallFilter` exception that this module does not add.
-- `activeResponse.capability` offers four of the scripts the package ships.
-  `disable-account`, `firewalld-drop` and `restart-wazuh` are not among them,
-  and none of the three is blocked by a missing capability. See the active
-  response section for each reason.
+- `activeResponse.capability` offers six of the scripts the package ships.
+  `restart-wazuh` and `restart.sh` are not among them: they restart through
+  `wazuh-control`, which starts daemons outside the supervision systemd
+  already provides. `ipfw`, `npf` and `pf` are BSD firewalls, and `kaspersky`
+  needs a vendor CLI that is not packaged here.

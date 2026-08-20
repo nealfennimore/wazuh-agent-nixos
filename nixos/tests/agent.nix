@@ -91,6 +91,22 @@ pkgs.testers.runNixOSTest {
       };
     };
 
+  # The one response that cannot be reached without root. This node exists to
+  # prove the escalation is asked for rather than assumed, and that it stays
+  # inside the one unit that needs it.
+  nodes.disabler =
+    { ... }:
+    {
+      imports = [ wazuhModule ];
+
+      services.wazuh-agent = {
+        enable = true;
+        manager.host = "192.0.2.10";
+        activeResponse.enable = true;
+        activeResponse.capability.disable-account.enable = true;
+      };
+    };
+
   testScript = ''
     # wazuh-execd is not here. Active response is off by default, and execd
     # with active response disabled logs "Active response disabled" and
@@ -468,6 +484,43 @@ pkgs.testers.runNixOSTest {
             f"env -i PATH={notifier_path} /bin/sh -c 'command -v curl' >/dev/null"
         )
         notifier.fail("test -e /etc/hosts.deny")
+
+    with subtest("only disable-account escalates, and only execd"):
+        disabler.wait_for_file("/var/ossec/etc/ossec.conf", timeout=120)
+
+        # shadow reads the real UID, so this response is unreachable without
+        # it. Nothing else in the module runs as root.
+        got = disabler.succeed(
+            "systemctl show -p User --value wazuh-execd.service"
+        ).strip()
+        assert got == "root", f"execd runs as {got!r}, disable-account needs root"
+
+        for daemon in daemons:
+            got = disabler.succeed(
+                f"systemctl show -p User --value {daemon}.service"
+            ).strip()
+            assert got == "wazuh", f"{daemon} runs as {got!r}, only execd may be root"
+
+        # The group must stay wazuh. execd and the scripts it forks write
+        # active-responses.log, and UMask 0027 under root:root would leave a
+        # file wazuh-logcollector cannot read, which is how the manager learns
+        # a response ran at all.
+        got = disabler.succeed(
+            "systemctl show -p Group --value wazuh-execd.service"
+        ).strip()
+        assert got == "wazuh", f"execd group is {got!r}, logcollector needs wazuh"
+
+        # passwd rewrites shadow through a temporary file and a lock in the
+        # same directory, so the whole of /etc has to be writable.
+        rwp = disabler.succeed(
+            "systemctl show -p ReadWritePaths --value wazuh-execd.service"
+        )
+        assert "/etc" in rwp, f"execd cannot write /etc: {rwp}"
+        assert "/var/ossec" in rwp, f"execd lost its state directory: {rwp}"
+
+        # And the escalation must not appear where it was not asked for.
+        for node, name in [(agent, "agent"), (responder, "responder"), (notifier, "notifier")]:
+            node.fail("systemctl show -p User --value wazuh-execd.service | grep -qx root")
 
     with subtest("enrollment is unverified unless a CA is configured"):
         # Off by default, and the absence must be an absent block rather than

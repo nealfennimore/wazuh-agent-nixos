@@ -270,6 +270,8 @@ let
       capabilities = [ "CAP_NET_ADMIN" ];
       readWritePaths = [ ];
       tmpfiles = [ ];
+      polkit = \"\";
+      runAsRoot = false;
     };
 
     # Adds a reject route. Note that it resolves "route" and not "ip"
@@ -281,6 +283,8 @@ let
       capabilities = [ "CAP_NET_ADMIN" ];
       readWritePaths = [ ];
       tmpfiles = [ ];
+      polkit = \"\";
+      runAsRoot = false;
     };
 
     # Posts to a webhook. No capability at all, only a binary.
@@ -295,6 +299,8 @@ let
       capabilities = [ ];
       readWritePaths = [ ];
       tmpfiles = [ ];
+      polkit = \"\";
+      runAsRoot = false;
     };
 
     # Appends to /etc/hosts.deny, and the path is hardcoded on Linux
@@ -320,23 +326,104 @@ let
       capabilities = [ ];
       readWritePaths = [ "-/etc/hosts.deny" ];
       tmpfiles = [ "f /etc/hosts.deny 0644 ${wazuhUser} ${wazuhGroup} -" ];
+      polkit = "";
+      runAsRoot = false;
+    };
+
+    # Adds a runtime rich rule (firewalld-drop.c:66,88,121):
+    #   firewall-cmd --add-rich-rule 'rule family=ipv4 source address=X drop'
+    #
+    # The binary is not the problem. services.firewalld puts its package in
+    # environment.systemPackages, so firewall-cmd is already on the daemon
+    # PATH through /run/current-system/sw. Authorization is the problem:
+    # firewall-cmd talks to firewalld over the system bus, and polkit gates
+    # a runtime change behind org.fedoraproject.FirewallD1.all.
+    #
+    # That action id reads broader than it is narrow. It covers every runtime
+    # change firewalld accepts, not only rich rules, because firewalld does
+    # not split runtime authorization any finer. Permanent changes are a
+    # different action and this rule does not grant them.
+    firewalld-drop = {
+      default = config.services.firewalld.enable or false;
+      description = ''
+        Add the offending address to the firewalld drop list.
+
+        Defaults to whether services.firewalld is enabled, so it follows the
+        host rather than needing to be kept in step by hand. It does nothing
+        without firewalld running.
+
+        This adds a polkit rule letting the wazuh user call
+        org.fedoraproject.FirewallD1.all, which is every runtime change
+        firewalld accepts. firewalld does not split runtime authorization
+        more finely than that. Permanent changes are a separate action and
+        stay denied.
+      '';
+      packages = [ ];
+      capabilities = [ ];
+      readWritePaths = [ ];
+      tmpfiles = [ ];
+      polkit = ''
+        polkit.addRule(function(action, subject) {
+          if (action.id == "org.fedoraproject.FirewallD1.all" &&
+              subject.user == "${wazuhUser}") {
+            return polkit.Result.YES;
+          }
+        });
+      '';
+      runAsRoot = false;
+    };
+
+    # Runs `passwd -l` (disable-account.c:67,78). This one is not a
+    # capability, and that is the whole point of the warning it carries.
+    #
+    # shadow takes amroot from the real UID (passwd.c:71,767) and refuses the
+    # flag when it is not 0 (passwd.c:972). No capability changes getuid, and
+    # a setuid wrapper only changes the effective UID. So the only way to
+    # reach this response is to run wazuh-execd as root.
+    #
+    # Group stays wazuh rather than root. execd and the scripts it forks
+    # write logs/active-responses.log, and UMask 0027 would otherwise leave
+    # that file root:root 0640, which wazuh-logcollector could not read. The
+    # reader is how the manager learns a response ran at all.
+    disable-account = {
+      default = false;
+      description = ''
+        Lock the offending user account with `passwd -l`.
+
+        This one runs wazuh-execd as root. It is not a capability grant and
+        no capability can substitute: shadow reads the real UID, so neither
+        a capability nor a setuid wrapper reaches it.
+
+        Enabling this gives up the privilege separation the rest of this
+        module is built on, for that one unit. /etc becomes writable to it,
+        because passwd rewrites shadow through a temporary file and a lock in
+        the same directory. The module warns at evaluation when this is on.
+
+        The unit keeps the wazuh group, so logs/active-responses.log stays
+        readable by wazuh-logcollector.
+      '';
+      packages = [ pkgs.shadow ];
+      capabilities = [
+        "CAP_CHOWN"
+        "CAP_DAC_OVERRIDE"
+        "CAP_FOWNER"
+      ];
+      readWritePaths = [ "/etc" ];
+      tmpfiles = [ ];
+      polkit = "";
+      runAsRoot = true;
     };
   };
 
-  # The rest of what the package ships cannot be reached from here, and none
-  # of the three is a capability question:
+  # The rest of what the package ships has no option here:
   #
-  #   disable-account  runs `passwd -l`. shadow sets amroot from the real UID
-  #                    (passwd.c:71,767) and refuses the flag when it is not 0
-  #                    (passwd.c:972). A setuid wrapper changes the effective
-  #                    UID, so it does not help. This needs execd to run as
-  #                    root, which would undo the privilege separation the
-  #                    rest of this module is built on.
-  #   firewalld-drop   needs firewalld running and reachable over D-Bus, which
-  #                    is a host decision rather than a grant.
   #   restart-wazuh    restarts through wazuh-control, which starts daemons
-  #                    outside the supervision systemd already provides.
+  #   restart.sh       outside the supervision systemd already provides.
   #   ipfw, npf, pf    BSD firewalls.
+  #   kaspersky        needs a vendor CLI that is not packaged here.
+  #   ip-customblock   is a stub for the operator to write. It appends under
+  #                    active-response/bin, which is already writable, so it
+  #                    needs nothing from this table.
 
   # Guarded on enable, so that capability settings left behind grant nothing
   # and create nothing while active response is off.
@@ -349,6 +436,12 @@ let
 
   execdPackages = gather "packages";
   execdCapabilities = gather "capabilities";
+
+  # Only disable-account sets this, and it cannot be reached any other way.
+  # See its entry above.
+  execdRunsAsRoot = any (r: r.runAsRoot) selectedResponses;
+
+  execdPolkit = concatStringsSep "\n" (filter (s: s != "") (map (r: r.polkit) selectedResponses));
 
   execdHardening =
     optionalAttrs (execdCapabilities != [ ]) {
@@ -389,7 +482,13 @@ let
 
     serviceConfig = hardening // optionalAttrs (d == "wazuh-execd") execdHardening // {
       Type = "exec";
-      User = wazuhUser;
+
+      # Root only when a selected response cannot be reached any other way,
+      # which today means disable-account alone. The group stays wazuh either
+      # way: execd and the scripts it forks write logs/active-responses.log,
+      # and UMask 0027 under root:root would leave a file wazuh-logcollector
+      # could not read, which is how the manager learns a response ran.
+      User = if (d == "wazuh-execd" && execdRunsAsRoot) then "root" else wazuhUser;
       Group = wazuhGroup;
       WorkingDirectory = "${stateDir}/";
 
@@ -791,6 +890,28 @@ in
     };
 
     users.groups.${wazuhGroup} = { };
+
+    warnings = optional execdRunsAsRoot ''
+      services.wazuh-agent.activeResponse.capability.disable-account.enable
+      is on, so wazuh-execd runs as root with /etc writable.
+
+      No capability reaches this response. shadow reads the real UID, so
+      neither a capability nor a setuid wrapper substitutes for root.
+
+      What that costs: execd is the unit that runs whatever the manager tells
+      it to run. Every other unit in this module is confined to the wazuh
+      user and holds no capability. This one is not. A manager that is
+      compromised, or one an attacker can impersonate, reaches root on this
+      host through it.
+
+      Enrollment does not verify the manager unless
+      services.wazuh-agent.registration.caFile is set. Set it if this is on.
+    '';
+
+    security.polkit = mkIf (execdPolkit != "") {
+      enable = true;
+      extraConfig = execdPolkit;
+    };
 
     systemd.tmpfiles.rules = [
       "d ${stateDir} 0750 ${wazuhUser} ${wazuhGroup} -"
