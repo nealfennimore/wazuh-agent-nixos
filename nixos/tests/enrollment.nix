@@ -44,39 +44,83 @@ pkgs.testers.runNixOSTest {
     };
 
   testScript = ''
-    start_all()
+    def manager_state():
+        """Everything needed to tell a load failure from a slow start."""
+        for command in [
+            "docker images",
+            "docker ps -a",
+            "docker logs wazuh-manager 2>&1 | tail -n 80",
+            "journalctl -u docker-wazuh-manager --no-pager | tail -n 60",
+        ]:
+            manager.log(f"--- {command}")
+            manager.log(manager.execute(command)[1])
+
+
+    # The manager starts alone, and the agent waits.
+    #
+    # Under start_all() the agent boots in the minutes the image spends
+    # loading, and spends them retrying enrollment against a manager that is
+    # not there yet. Those retries are not failures, but they fill the console
+    # with "(1208): Unable to connect to enrollment service" and bury whatever
+    # did go wrong. Starting in order removes the noise at the source.
+    manager.start()
 
     with subtest("the manager container starts and listens"):
-        # The unit loads a multi-gigabyte image before it runs anything.
-        manager.wait_for_unit("docker-wazuh-manager.service", timeout=900)
+        # The unit runs `docker load` on a multi-gigabyte image in ExecStartPre
+        # before it runs anything. oci-containers sets TimeoutStartSec = 0, so
+        # systemd does not cut that short.
+        manager.log("loading the manager image, this takes minutes")
+        manager.wait_for_unit("docker-wazuh-manager.service", timeout=1800)
 
-        # The image starts the daemons from cont-init.d/2-manager, which ends
-        # in `wazuh-control start`. That runs after the container is up, so
-        # the ports open later than the unit does.
-        #   1515 authd, enrollment
-        #   1514 remoted, agent traffic
-        manager.wait_for_open_port(1515, timeout=900)
-        manager.wait_for_open_port(1514, timeout=900)
+        try:
+            # An image whose tag does not match what the unit runs makes docker
+            # fall back to pulling it, and this VM has no route to a registry.
+            # That failure is worth separating from a manager that is merely
+            # slow to start.
+            manager.succeed("docker ps | grep -q wazuh-manager")
 
+            # The image starts the daemons from cont-init.d/2-manager, which
+            # ends in `wazuh-control start`. That runs after the container is
+            # up, so the ports open later than the unit does.
+            #   1515 authd, enrollment
+            #   1514 remoted, agent traffic
+            manager.wait_for_open_port(1515, timeout=900)
+            manager.wait_for_open_port(1514, timeout=900)
+        except Exception:
+            manager_state()
+            raise
+
+    # Only now. The agent's own enrollment at boot then has something to reach.
+    agent.start()
     agent.wait_for_unit("multi-user.target")
     agent.wait_for_file("/var/ossec/etc/ossec.conf", timeout=120)
 
     with subtest("the agent enrolls against authd"):
-        # The boot attempt fails, because the manager needs longer to start
-        # than the agent does. That is the case the module already handles:
+        # A safety net rather than the main path. The manager is already
+        # listening, so the boot attempt should have worked. If it did not,
         # markRegistered writes no marker when client.keys is empty, so
-        # ConditionPathExists does not skip the next attempt.
+        # ConditionPathExists does not skip this attempt.
         agent.succeed("systemctl restart wazuh-agent-auth.service")
         agent.wait_for_file("/var/ossec/.agent-registered", timeout=180)
         agent.succeed("test -s /var/ossec/etc/client.keys")
 
         # The manager's own copy is the independent evidence. authd appends
         # the agent to its client.keys, under the node hostname.
-        manager.wait_until_succeeds(
-            "docker exec wazuh-manager"
-            " grep -q ' agent ' /var/ossec/etc/client.keys",
-            timeout=120,
-        )
+        try:
+            manager.wait_until_succeeds(
+                "docker exec wazuh-manager"
+                " grep -q ' agent ' /var/ossec/etc/client.keys",
+                timeout=120,
+            )
+        except Exception:
+            manager.log("--- the manager's client.keys")
+            manager.log(
+                manager.execute(
+                    "docker exec wazuh-manager cat /var/ossec/etc/client.keys"
+                )[1]
+            )
+            manager_state()
+            raise
 
     with subtest("the agent connects to remoted"):
         # The daemons started before a key existed. Restart them by name:
@@ -138,10 +182,25 @@ pkgs.testers.runNixOSTest {
         agent.succeed(f"systemd-cat --identifier=wazuh-probe echo {token}")
 
         # The agent buffers while remoted restarts, so this needs to retry.
-        manager.wait_until_succeeds(
-            f"docker exec wazuh-manager grep -q -F '{token}'"
-            " /var/ossec/logs/archives/archives.json",
-            timeout=300,
-        )
+        try:
+            manager.wait_until_succeeds(
+                f"docker exec wazuh-manager grep -q -F '{token}'"
+                " /var/ossec/logs/archives/archives.json",
+                timeout=300,
+            )
+        except Exception:
+            # Separate "the event never arrived" from "the archive is not
+            # being written", which have different causes.
+            manager.log("--- archive directory")
+            manager.log(
+                manager.execute("docker exec wazuh-manager ls -l /var/ossec/logs/archives")[1]
+            )
+            manager.log("--- manager ossec.log")
+            manager.log(
+                manager.execute("docker exec wazuh-manager tail -n 60 /var/ossec/logs/ossec.log")[1]
+            )
+            agent.log("--- agentd state")
+            agent.log(agent.execute("cat /var/ossec/var/run/wazuh-agentd.state")[1])
+            raise
   '';
 }
