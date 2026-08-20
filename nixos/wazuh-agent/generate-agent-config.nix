@@ -103,12 +103,15 @@ let
   # Element names are config/client-config.c:391-393. The block goes inside
   # <client>, so anchor on the one </server> in the template.
   enrollmentPaths =
-    lib.optional (cfg.registration.caFile != null)
-      "<server_ca_path>${cfg.registration.caFile}</server_ca_path>"
-    ++ lib.optional (cfg.registration.certFile != null)
-      "<agent_certificate_path>${cfg.registration.certFile}</agent_certificate_path>"
-    ++ lib.optional (cfg.registration.keyFile != null)
-      "<agent_key_path>${cfg.registration.keyFile}</agent_key_path>";
+    lib.optional (
+      cfg.registration.caFile != null
+    ) "<server_ca_path>${cfg.registration.caFile}</server_ca_path>"
+    ++ lib.optional (
+      cfg.registration.certFile != null
+    ) "<agent_certificate_path>${cfg.registration.certFile}</agent_certificate_path>"
+    ++ lib.optional (
+      cfg.registration.keyFile != null
+    ) "<agent_key_path>${cfg.registration.keyFile}</agent_key_path>";
 
   serverClose = "</server>";
 
@@ -187,9 +190,7 @@ pkgs.runCommand "ossec.conf"
 
     # Enrollment verification is opt in, so assert both directions. An empty
     # <enrollment> block would be worse than none: it reads as configured.
-    test "$(grep -c '<enrollment>' ossec.conf)" -eq ${
-      if enrollmentPaths == [ ] then "0" else "1"
-    }
+    test "$(grep -c '<enrollment>' ossec.conf)" -eq ${if enrollmentPaths == [ ] then "0" else "1"}
 
     # No FHS binary directory may survive the replacement above.
     if grep -qE '<directories>[^<]*/(usr/)?s?bin' ossec.conf; then

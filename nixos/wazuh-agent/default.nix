@@ -69,35 +69,22 @@ let
   ];
 
   preStart = ''
-    ${concatMapStringsSep "\n"
-      (
-        dir: ''
-          rm -rf ${stateDir}/${dir}
-          cp -R --no-preserve=ownership,mode ${pkg}/${dir} ${stateDir}/${dir}
-        ''
-      )
-      packageDirs
-    }
+    ${concatMapStringsSep "\n" (dir: ''
+      rm -rf ${stateDir}/${dir}
+      cp -R --no-preserve=ownership,mode ${pkg}/${dir} ${stateDir}/${dir}
+    '') packageDirs}
 
-    ${concatMapStringsSep "\n"
-      (
-        dir: ''
-          if [ -d ${pkg}/${dir} ]; then
-            rm -rf ${stateDir}/${dir}
-            cp -R --no-preserve=ownership,mode ${pkg}/${dir} ${stateDir}/${dir}
-          fi
-        ''
-      )
-      optionalPackageDirs
-    }
+    ${concatMapStringsSep "\n" (dir: ''
+      if [ -d ${pkg}/${dir} ]; then
+        rm -rf ${stateDir}/${dir}
+        cp -R --no-preserve=ownership,mode ${pkg}/${dir} ${stateDir}/${dir}
+      fi
+    '') optionalPackageDirs}
 
-    ${
-      concatMapStringsSep "\n"
-      (
-        dir: "[ -d ${stateDir}/${dir} ] || cp -R --no-preserve=ownership,mode ${pkg}/${dir} ${stateDir}/${dir}"
-      )
-      stateDirs
-    }
+    ${concatMapStringsSep "\n" (
+      dir:
+      "[ -d ${stateDir}/${dir} ] || cp -R --no-preserve=ownership,mode ${pkg}/${dir} ${stateDir}/${dir}"
+    ) stateDirs}
 
     [ -d ${stateDir}/etc ] || cp -R --no-preserve=ownership,mode ${pkg}/etc ${stateDir}/etc
 
@@ -270,7 +257,7 @@ let
       capabilities = [ "CAP_NET_ADMIN" ];
       readWritePaths = [ ];
       tmpfiles = [ ];
-      polkit = \"\";
+      polkit = "";
       runAsRoot = false;
     };
 
@@ -283,7 +270,7 @@ let
       capabilities = [ "CAP_NET_ADMIN" ];
       readWritePaths = [ ];
       tmpfiles = [ ];
-      polkit = \"\";
+      polkit = "";
       runAsRoot = false;
     };
 
@@ -299,7 +286,7 @@ let
       capabilities = [ ];
       readWritePaths = [ ];
       tmpfiles = [ ];
-      polkit = \"\";
+      polkit = "";
       runAsRoot = false;
     };
 
@@ -480,31 +467,34 @@ let
       WAZUH_HOME = stateDir;
     };
 
-    serviceConfig = hardening // optionalAttrs (d == "wazuh-execd") execdHardening // {
-      Type = "exec";
+    serviceConfig =
+      hardening
+      // optionalAttrs (d == "wazuh-execd") execdHardening
+      // {
+        Type = "exec";
 
-      # Root only when a selected response cannot be reached any other way,
-      # which today means disable-account alone. The group stays wazuh either
-      # way: execd and the scripts it forks write logs/active-responses.log,
-      # and UMask 0027 under root:root would leave a file wazuh-logcollector
-      # could not read, which is how the manager learns a response ran.
-      User = if (d == "wazuh-execd" && execdRunsAsRoot) then "root" else wazuhUser;
-      Group = wazuhGroup;
-      WorkingDirectory = "${stateDir}/";
+        # Root only when a selected response cannot be reached any other way,
+        # which today means disable-account alone. The group stays wazuh either
+        # way: execd and the scripts it forks write logs/active-responses.log,
+        # and UMask 0027 under root:root would leave a file wazuh-logcollector
+        # could not read, which is how the manager learns a response ran.
+        User = if (d == "wazuh-execd" && execdRunsAsRoot) then "root" else wazuhUser;
+        Group = wazuhGroup;
+        WorkingDirectory = "${stateDir}/";
 
-      # Straight from the store. These used to run through a setuid wrapper,
-      # which gave every local user a way to execute them as the wazuh user,
-      # the account that owns client.keys. The wrapper bought nothing: systemd
-      # already sets User and Group, and the w_homedir patch makes the daemons
-      # read WAZUH_HOME from the environment instead of resolving
-      # /proc/self/exe, which is the other reason a wrapper was once useful.
-      # agent-auth has always started from the store path this way.
-      ExecStart =
-        if d != "wazuh-modulesd" then
-          "${pkg}/bin/${d} -f -c ${stateDir}/etc/ossec.conf"
-        else
-          "${pkg}/bin/${d} -f";
-    };
+        # Straight from the store. These used to run through a setuid wrapper,
+        # which gave every local user a way to execute them as the wazuh user,
+        # the account that owns client.keys. The wrapper bought nothing: systemd
+        # already sets User and Group, and the w_homedir patch makes the daemons
+        # read WAZUH_HOME from the environment instead of resolving
+        # /proc/self/exe, which is the other reason a wrapper was once useful.
+        # agent-auth has always started from the store path this way.
+        ExecStart =
+          if d != "wazuh-modulesd" then
+            "${pkg}/bin/${d} -f -c ${stateDir}/etc/ossec.conf"
+          else
+            "${pkg}/bin/${d} -f";
+      };
   };
 in
 {
@@ -799,14 +789,12 @@ in
             type = types.submodule {
               # Generated from responseRequirements, so a response cannot be
               # offered as an option without also declaring what it needs.
-              options = mapAttrs (
-                _: req: {
-                  enable = mkOption {
-                    type = types.bool;
-                    inherit (req) default description;
-                  };
-                }
-              ) responseRequirements;
+              options = mapAttrs (_: req: {
+                enable = mkOption {
+                  type = types.bool;
+                  inherit (req) default description;
+                };
+              }) responseRequirements;
             };
           };
         };
