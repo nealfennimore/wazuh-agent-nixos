@@ -68,26 +68,59 @@ let
     "shared"
   ];
 
-  # The refresh below replaces the contents of each package directory and
-  # keeps the directory inode itself. Do not change this back to a
-  # `rm -rf` of the directory. The kernel detaches a mount from every
-  # mount namespace when its mountpoint directory is deleted, every daemon
-  # unit holds a writable bind on active-response, and this unit runs
-  # again in any transaction that starts a daemon. Deleting the directory
-  # therefore unmounted active-response from every running daemon, and the
-  # daemons lost their writable bind, silently, until their next restart.
-  preStart = ''
-    ${concatMapStringsSep "\n" (dir: ''
+  # Subdirectories that carry a mount inside a unit namespace, listed under
+  # the package directory that holds them. The refresh must keep these
+  # inodes for the same reason it keeps the top-level ones. See the note at
+  # refreshPackageDir.
+  #
+  # There is one. wazuh-execd binds active-response/bin to make the
+  # response programs executable, through ExecPaths below.
+  mountedSubdirs = {
+    active-response = [ "bin" ];
+  };
+
+  # Refresh one package directory in place.
+  #
+  # The inode of the directory itself survives, and so does the inode of
+  # every subdirectory in mountedSubdirs. Do not change either back to an
+  # `rm -rf` of the directory. The kernel detaches a mount from every mount
+  # namespace when its mount point directory is deleted, and this unit runs
+  # again in any transaction that starts a daemon, so a deletion here
+  # reaches a daemon that is already running.
+  #
+  # Both halves of that were live defects. The top level took the writable
+  # bind on active-response away from every daemon, which checks.agent
+  # caught. active-response/bin took the exec carve-out away from
+  # wazuh-execd, which nothing caught: the unit stays active, the target
+  # stays reached, and every response fails execve against the noexec mount
+  # over the parent, with the error in logs/active-responses.log.
+  #
+  # The contents still go, at both levels. A stale lock directory under
+  # active-response/bin must not survive a refresh: the responses use mkdir
+  # on that directory as their mutex, so one left behind by a killed
+  # response reads as held.
+  refreshPackageDir =
+    dir:
+    let
+      kept = mountedSubdirs.${dir} or [ ];
+      prune = concatMapStringsSep " " (name: "-not -name '${name}'") kept;
+    in
+    ''
       mkdir -p ${stateDir}/${dir}
-      find ${stateDir}/${dir} -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+      find ${stateDir}/${dir} -mindepth 1 -maxdepth 1 ${prune} -exec rm -rf {} +
+      ${concatMapStringsSep "\n" (name: ''
+        mkdir -p ${stateDir}/${dir}/${name}
+        find ${stateDir}/${dir}/${name} -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+      '') kept}
       cp -R --no-preserve=ownership,mode ${pkg}/${dir}/. ${stateDir}/${dir}/
-    '') packageDirs}
+    '';
+
+  preStart = ''
+    ${concatMapStringsSep "\n" refreshPackageDir packageDirs}
 
     ${concatMapStringsSep "\n" (dir: ''
       if [ -d ${pkg}/${dir} ]; then
-        mkdir -p ${stateDir}/${dir}
-        find ${stateDir}/${dir} -mindepth 1 -maxdepth 1 -exec rm -rf {} +
-        cp -R --no-preserve=ownership,mode ${pkg}/${dir}/. ${stateDir}/${dir}/
+        ${refreshPackageDir dir}
       fi
     '') optionalPackageDirs}
 
@@ -177,25 +210,83 @@ let
   # the note at preStart), and only the writable side depends on child
   # mounts at all.
   #
-  # The same list carries NoExecPaths, so writable and executable never
-  # overlap. One exception: wazuh-execd gets an ExecPaths carve-out for
-  # active-response/bin, where the response programs live and where
-  # firewall-drop and host-deny create their lock directories (LOCK_PATH
-  # in src/active-response/firewalls/default-firewall-drop.c). That
-  # overlap is the residual hole, and closing it needs root-owned package
-  # trees, which means a root setup unit, and that trade is not taken
-  # here. The package trees themselves stay executable: the response
+  # Every unit's writable list carries NoExecPaths as well, so writable and
+  # executable never overlap. One exception: wazuh-execd gets an ExecPaths
+  # carve-out for active-response/bin, where the response programs live and
+  # where firewall-drop and host-deny create their lock directories
+  # (LOCK_PATH in src/active-response/firewalls/default-firewall-drop.c).
+  # That overlap is the residual hole, and closing it needs root-owned
+  # package trees, which means a root setup unit, and that trade is not
+  # taken here. The package trees themselves stay executable: the response
   # binaries load their libraries from lib through their $ORIGIN/../../lib
   # rpath (src/Makefile:189), and a read-only tree with the execute bit is
-  # exactly what they need.
-  writableStateDirs = map (dir: "${stateDir}/${dir}") [
-    "etc"
+  # exactly what they need. The exception to that exception is bin inside
+  # wazuh-execd; see noExecStateDirsFor.
+  #
+  # The writable set is per unit, not shared. A directory that only one
+  # unit writes is read-only in the other four, so a compromise of one
+  # daemon does not reach what another daemon runs.
+  #
+  # These four are the state every daemon keeps: its databases, its
+  # queues, its logs and its scratch space.
+  sharedWritableDirs = [
     "logs"
     "queue"
     "var"
     "tmp"
-    "active-response"
   ];
+
+  # Writable in the units that write them, and read-only everywhere else.
+  # Both of these were shared until now, and both decide what the agent
+  # runs, so a compromise of any one daemon reached the privilege of
+  # another through them.
+  #
+  # etc holds two files that select a program. etc/ossec.conf takes a
+  # <localfile> with <log_format>command</log_format>, which makes
+  # wazuh-logcollector run any command. Upstream treats that as a privilege
+  # boundary and refuses such an entry when it arrives from the manager
+  # (src/config/localfile-config.c, "Remote commands are not accepted from
+  # the manager"), and the local file is always accepted. etc/shared/ar.conf
+  # is DEFAULTAR (src/headers/defs.h), and it maps a response name to a
+  # binary under active-response/bin. NoExecPaths does not reach either: the
+  # command a <localfile> names runs from /nix/store or
+  # /run/current-system/sw, outside the state directory.
+  #
+  # Two units write etc. wazuh-agent-auth writes etc/client.keys, and
+  # wazuh-agentd writes it too when the manager triggers a re-enrollment,
+  # plus etc/shared/merged.mg when the manager pushes shared configuration.
+  # wazuh-logcollector, wazuh-syscheckd, wazuh-modulesd and wazuh-execd read
+  # etc and do not write it, so they lose the write.
+  #
+  # active-response is where wazuh-execd runs response programs from, with
+  # CAP_NET_ADMIN or, under disable-account, as root. Nothing else in the
+  # module touches it. So only wazuh-execd keeps the write, which narrows
+  # the reach from any daemon to the one unit that already holds the
+  # privilege. The residual hole above is unchanged: wazuh-execd can still
+  # rewrite what wazuh-execd runs.
+  #
+  # setup-pre-wazuh is not here. It refreshes every package directory and
+  # writes the whole state directory, through the ProtectSystem = "full"
+  # at its own unit.
+  unitWritableDirs =
+    unit:
+    optional (unit == "wazuh-agentd" || unit == "wazuh-agent-auth") "etc"
+    ++ optional (unit == "wazuh-execd") "active-response";
+
+  writableStateDirsFor =
+    unit: map (dir: "${stateDir}/${dir}") (sharedWritableDirs ++ unitWritableDirs unit);
+
+  # bin holds no library and nothing in this module executes out of it. The
+  # only thing that does is the restart-wazuh response, which execs
+  # bin/wazuh-control and starts daemons outside the supervision systemd
+  # already provides. The manager selects a response through ar.conf, and
+  # the per-response options here gate the PATH and the capabilities rather
+  # than which binaries exist, so restart-wazuh is reachable from a manager
+  # whether or not an operator wanted it. Denying exec on bin inside
+  # wazuh-execd is what stops it, and it costs nothing: lib stays
+  # executable, and bin is on no library path.
+  noExecStateDirsFor =
+    unit: writableStateDirsFor unit ++ optional (unit == "wazuh-execd") "${stateDir}/bin";
 
   # Sandboxing shared by every unit in this module.
   #
@@ -215,11 +306,16 @@ let
     # The state directories are the only thing the agent writes, and
     # nothing writable is a program to run: a payload staged in queue,
     # logs or tmp cannot be executed. The package trees stay read-only
-    # through the strict root. See the writableStateDirs note above for
+    # through the strict root. See the sharedWritableDirs note above for
     # why the writable side is the enumerated one.
+    #
+    # These two are the narrowest set any unit gets. Every unit that needs
+    # more replaces them through writableStateDirsFor and
+    # noExecStateDirsFor, so a unit added without a thought about etc or
+    # active-response fails closed rather than open.
     ProtectSystem = "strict";
-    ReadWritePaths = writableStateDirs;
-    NoExecPaths = writableStateDirs;
+    ReadWritePaths = map (dir: "${stateDir}/${dir}") sharedWritableDirs;
+    NoExecPaths = map (dir: "${stateDir}/${dir}") sharedWritableDirs;
 
     # read-only, not true. File integrity monitoring must still be able to read
     # /root and /home, which syscheck.directories documents as a reasonable
@@ -495,16 +591,10 @@ let
 
   execdPolkit = concatStringsSep "\n" (filter (s: s != "") (map (r: r.polkit) selectedResponses));
 
-  execdHardening =
-    optionalAttrs (execdCapabilities != [ ]) {
-      CapabilityBoundingSet = execdCapabilities;
-      AmbientCapabilities = execdCapabilities;
-    }
-    // optionalAttrs (gather "readWritePaths" != [ ]) {
-      # This replaces the shared value rather than adding to it, so the
-      # state directories have to come along.
-      ReadWritePaths = writableStateDirs ++ gather "readWritePaths";
-    };
+  execdHardening = optionalAttrs (execdCapabilities != [ ]) {
+    CapabilityBoundingSet = execdCapabilities;
+    AmbientCapabilities = execdCapabilities;
+  };
 
   mkService = d: {
     description = d;
@@ -551,15 +641,25 @@ let
         // {
           # The response programs are the one thing execd executes out of
           # a writable directory. This is the one place where writable and
-          # executable overlap; the writableStateDirs note explains the
+          # executable overlap; the unitWritableDirs note explains the
           # residual hole and the lock directories that force it. The
           # read-only trees need no carve-out: the strict root leaves them
           # executable, which is what the response binaries need to map
           # their libraries out of lib.
+          #
+          # This is a mount, and active-response/bin is its mount point, so
+          # the refresh must keep that inode. mountedSubdirs is what does
+          # it.
           ExecPaths = [ "-${stateDir}/active-response/bin" ];
         }
       )
       // {
+        # Per unit rather than shared. A response may need a path outside
+        # the state directory, and only wazuh-execd runs responses.
+        ReadWritePaths =
+          writableStateDirsFor d ++ optionals (d == "wazuh-execd") (gather "readWritePaths");
+        NoExecPaths = noExecStateDirsFor d;
+
         Type = "exec";
 
         # Root only when a selected response cannot be reached any other way,
@@ -1114,6 +1214,10 @@ in
             Type = "oneshot";
             User = wazuhUser;
             Group = wazuhGroup;
+            # This unit is one of the two that write etc: agent-auth writes
+            # etc/client.keys. It writes var too, for the marker above.
+            ReadWritePaths = writableStateDirsFor "wazuh-agent-auth";
+            NoExecPaths = noExecStateDirsFor "wazuh-agent-auth";
             ExecStart =
               "${pkg}/bin/agent-auth -m ${host} -p ${toString cfg.registration.port}"
               + optionalString (certFlags != "") " ${certFlags}";

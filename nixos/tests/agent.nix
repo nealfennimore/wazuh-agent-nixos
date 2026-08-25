@@ -259,28 +259,56 @@ pkgs.testers.runNixOSTest {
         # The read-only guarantee rests on ProtectSystem = "strict": the
         # package trees have no mounts of their own, and the root of the
         # namespace is read-only. Only the state directories get a writable
-        # bind. The writableStateDirs note in the module explains the
+        # bind. The sharedWritableDirs note in the module explains the
         # direction: the kernel detaches a mount whose mountpoint directory
         # is deleted, the setup refresh used to delete the package
         # directories, and a lost read-only mount fails open.
+        #
+        # These four are the state every daemon keeps.
         writable = [
-            "/var/ossec/etc",
             "/var/ossec/logs",
             "/var/ossec/queue",
             "/var/ossec/var",
             "/var/ossec/tmp",
-            "/var/ossec/active-response",
         ]
+
+        # etc and active-response are per unit, because both decide what the
+        # agent runs. etc carries ossec.conf and shared/ar.conf;
+        # active-response carries the response programs. Only the units that
+        # write them get the write, so a compromise of one daemon does not
+        # reach what another daemon runs.
+        etc_writers = ["wazuh-agentd", "wazuh-agent-auth"]
         for daemon in daemons:
             rwp = agent.succeed(
                 f"systemctl show -p ReadWritePaths --value {daemon}.service"
             )
             for path in writable:
                 assert path in rwp, f"{daemon}: {path} is not writable: {rwp!r}"
+            if daemon in etc_writers:
+                assert "/var/ossec/etc" in rwp, f"{daemon}: etc is read-only: {rwp!r}"
+            else:
+                assert (
+                    "/var/ossec/etc" not in rwp
+                ), f"{daemon}: etc is writable and it does not write it: {rwp!r}"
+            # No unit on this node runs responses. Active response is off
+            # here, so wazuh-execd does not exist.
+            assert (
+                "/var/ossec/active-response" not in rwp
+            ), f"{daemon}: active-response is writable outside execd: {rwp!r}"
             ro = agent.succeed(
                 f"systemctl show -p ReadOnlyPaths --value {daemon}.service"
             ).strip()
             assert ro == "", f"{daemon}: unexpected ReadOnlyPaths {ro!r}"
+
+        # agent-auth is not in daemons, and it is the other unit that writes
+        # etc. Assert it from the same table rather than trusting the split.
+        rwp = agent.succeed(
+            "systemctl show -p ReadWritePaths --value wazuh-agent-auth.service"
+        )
+        assert "/var/ossec/etc" in rwp, f"agent-auth cannot write client.keys: {rwp!r}"
+        assert (
+            "/var/ossec/var" in rwp
+        ), f"agent-auth cannot write the enrollment marker: {rwp!r}"
 
         # The mount table of the daemon's namespace, read from the host
         # through /proc/<pid>/mountinfo. Field five is the mount point and
@@ -320,7 +348,17 @@ pkgs.testers.runNixOSTest {
             flags = state[1].split(",")
             assert flags[0] == "rw", f"{path} mounted {state[1]}"
             assert "noexec" in flags, f"{path} lacks noexec: {state[1]}"
-        for tree in ["bin", "lib", "ruleset", "wodles", "agentless"]:
+        # logcollector writes neither etc nor active-response, so neither
+        # may carry a writable mount here, on top of the package trees.
+        for tree in [
+            "bin",
+            "lib",
+            "ruleset",
+            "wodles",
+            "agentless",
+            "etc",
+            "active-response",
+        ]:
             state = mount_state(f"/var/ossec/{tree}")
             assert state is None or state[1].split(",")[0] == "ro", (
                 f"/var/ossec/{tree} is writable through a mount: {state}"
@@ -341,13 +379,45 @@ pkgs.testers.runNixOSTest {
         agent.succeed(f"nsenter -t {pid} -m -r -w -- touch /var/ossec/logs/probe")
         agent.succeed(f"nsenter -t {pid} -m -r -w -- rm /var/ossec/logs/probe")
 
+        # The two files that decide what the agent runs. A <localfile> with
+        # <log_format>command</log_format> in ossec.conf makes logcollector
+        # run any command, and shared/ar.conf maps a response name to a
+        # binary. logcollector must not be able to write either, and it must
+        # not be able to stage a response binary.
+        agent.fail(
+            f"nsenter -t {pid} -m -r -w -- sh -c 'echo x >> /var/ossec/etc/ossec.conf'"
+        )
+        agent.fail(
+            f"nsenter -t {pid} -m -r -w -- touch /var/ossec/etc/shared/ar.conf"
+        )
+        agent.fail(
+            f"nsenter -t {pid} -m -r -w -- touch /var/ossec/active-response/bin/probe"
+        )
+        agent.fail("test -e /var/ossec/active-response/bin/probe")
+        # The file is still readable. Every daemon reads its configuration.
+        agent.succeed(f"nsenter -t {pid} -m -r -w -- head -1 /var/ossec/etc/ossec.conf")
+
     with subtest("writable state does not execute, read-only code does"):
+        # NoExecPaths must match the unit's writable set, so writable and
+        # executable never overlap and no needless mount is created under
+        # the state directory. Every mount there is one more thing the
+        # refresh can detach. wazuh-execd is the one exception, because it
+        # also denies exec on bin; the responder node covers that.
         for daemon in daemons:
+            rwp = agent.succeed(
+                f"systemctl show -p ReadWritePaths --value {daemon}.service"
+            )
             nep = agent.succeed(
                 f"systemctl show -p NoExecPaths --value {daemon}.service"
             )
-            for path in writable:
-                assert path in nep, f"{daemon}: {path} is not noexec: {nep!r}"
+            under_state = set(
+                p for p in nep.split() if p.startswith("/var/ossec/")
+            )
+            wanted = set(p for p in rwp.split() if p.startswith("/var/ossec/"))
+            assert under_state == wanted, (
+                f"{daemon}: NoExecPaths {sorted(under_state)} does not match"
+                f" the writable set {sorted(wanted)}"
+            )
             # No daemon on this node has an exec carve-out. Only execd gets
             # one, for active-response/bin, and the responder node asserts
             # it.
@@ -640,8 +710,149 @@ pkgs.testers.runNixOSTest {
         assert "/var/ossec/lib" not in ep, f"needless lib carve-out: {ep!r}"
         assert "/var/ossec/bin" not in ep, f"needless bin carve-out: {ep!r}"
 
+        # execd runs whatever the manager selects through ar.conf, and
+        # restart-wazuh execs bin/wazuh-control, which starts daemons
+        # outside the supervision systemd already provides. bin is
+        # read-only, and read-only is not enough here: the module denies
+        # exec on it inside this one unit.
+        nep = responder.succeed(
+            "systemctl show -p NoExecPaths --value wazuh-execd.service"
+        )
+        assert "/var/ossec/bin" in nep, f"execd can exec from bin: {nep!r}"
+        assert (
+            "/var/ossec/etc" not in nep
+        ), f"execd holds a needless mount on etc: {nep!r}"
+
         # Not enabled on the default node, so nothing there was widened.
         agent.fail("test -e /etc/hosts.deny")
+
+    with subtest("the exec carve-out survives a refresh of the package trees"):
+        # The regression this guards against. ExecPaths is a mount, and
+        # /var/ossec/active-response/bin is its mount point. The kernel
+        # detaches a mount from every namespace when its mount point
+        # directory is deleted, and setup-pre-wazuh refreshes the package
+        # trees on every activation, so a refresh that deletes that
+        # directory takes the carve-out away from a running execd.
+        #
+        # Nothing reports it. The unit stays active, wazuh.target stays
+        # reached, and every response then fails execve against the noexec
+        # mount over the parent, with the error in
+        # logs/active-responses.log rather than in the journal.
+        #
+        # setup-pre-wazuh is a oneshot without RemainAfterExit and is
+        # wantedBy wazuh-agent-auth.service, so a re-enrollment runs it
+        # again with no daemon restarted. An activation that changes only
+        # the generated configuration does the same, because execd names a
+        # fixed path and its unit does not change.
+        responder.wait_for_unit("wazuh-execd.service")
+        pid = responder.succeed(
+            "systemctl show -p MainPID --value wazuh-execd.service"
+        ).strip()
+        assert pid not in ("", "0"), f"wazuh-execd is not running: {pid!r}"
+
+        def execd_carve_out():
+            """The mount options at active-response/bin in execd, or None."""
+            mountinfo = responder.succeed(f"cat /proc/{pid}/mountinfo")
+            for line in mountinfo.splitlines():
+                f = line.split()
+                if len(f) > 5 and f[4] == "/var/ossec/active-response/bin":
+                    return f[5]
+            return None
+
+        # A probe rather than a real response. The response programs read a
+        # message on stdin and act on the host, and what this asserts is the
+        # mount, not the program. execd owns active-response/bin, so the
+        # probe goes in from the host and comes straight back out.
+        probe = "/var/ossec/active-response/bin/probe.sh"
+
+        def exec_works():
+            responder.succeed(
+                f"printf '#!/bin/sh\\nexit 0\\n' > {probe} && chmod 755 {probe}"
+            )
+            got = responder.succeed(
+                f"nsenter -t {pid} -m -r -w -- sh -c '{probe}; echo $?'"
+            ).strip()
+            responder.succeed(f"rm -f {probe}")
+            # 126 is the shell's code for a file it found and could not
+            # execute, which is what a noexec mount produces.
+            return got == "0"
+
+        before = execd_carve_out()
+        assert before is not None, "execd has no mount at active-response/bin"
+        assert "noexec" not in before, f"the carve-out is noexec: {before}"
+        assert exec_works(), "execd cannot exec a response before the refresh"
+
+        responder.succeed("systemctl start setup-pre-wazuh.service")
+
+        after = execd_carve_out()
+        assert after is not None, (
+            "the refresh detached execd's exec carve-out at"
+            " /var/ossec/active-response/bin"
+        )
+        assert "noexec" not in after, f"the carve-out came back noexec: {after}"
+        assert exec_works(), "execd cannot exec a response after the refresh"
+
+        # execd did not restart, so the namespace under test is the one the
+        # refresh ran against rather than a fresh one.
+        still = responder.succeed(
+            "systemctl show -p MainPID --value wazuh-execd.service"
+        ).strip()
+        assert still == pid, f"execd restarted during the refresh: {pid} -> {still}"
+
+        # The refresh still clears the directory's contents. A lock
+        # directory left behind by a killed response reads as held, because
+        # the responses use mkdir on it as their mutex.
+        responder.succeed("mkdir -p /var/ossec/active-response/bin/fw-drop")
+        responder.succeed("systemctl start setup-pre-wazuh.service")
+        responder.fail("test -e /var/ossec/active-response/bin/fw-drop")
+
+        # And the response programs are back after it.
+        responder.succeed("test -x /var/ossec/active-response/bin/firewall-drop")
+
+        # bin stays denied inside execd across the refresh too.
+        responder.fail(
+            f"nsenter -t {pid} -m -r -w -- /var/ossec/bin/wazuh-control info -t"
+        )
+
+    with subtest("only execd reaches the response programs"):
+        # The reach this narrows. execd runs the response programs with
+        # CAP_NET_ADMIN, or as root under disable-account. While
+        # active-response was writable in every daemon, a compromise of any
+        # one of them staged a binary that execd later ran. This node has
+        # active response on, so it is the case that matters.
+        for daemon in daemons:
+            rwp = responder.succeed(
+                f"systemctl show -p ReadWritePaths --value {daemon}.service"
+            )
+            assert (
+                "/var/ossec/active-response" not in rwp
+            ), f"{daemon} can stage a response binary: {rwp!r}"
+            if daemon != "wazuh-agentd":
+                assert (
+                    "/var/ossec/etc" not in rwp
+                ), f"{daemon} can rewrite ossec.conf or ar.conf: {rwp!r}"
+
+        # Enforcement, in the namespace of a daemon that is not execd.
+        other = responder.succeed(
+            "systemctl show -p MainPID --value wazuh-logcollector.service"
+        ).strip()
+        responder.fail(
+            f"nsenter -t {other} -m -r -w --"
+            " touch /var/ossec/active-response/bin/staged"
+        )
+        responder.fail("test -e /var/ossec/active-response/bin/staged")
+        responder.fail(
+            f"nsenter -t {other} -m -r -w --"
+            " sh -c 'echo x >> /var/ossec/etc/shared/ar.conf'"
+        )
+        # It still reads them, which is all it ever needed.
+        responder.succeed(
+            f"nsenter -t {other} -m -r -w -- head -1 /var/ossec/etc/ossec.conf"
+        )
+        responder.succeed(
+            f"nsenter -t {other} -m -r -w --"
+            " test -x /var/ossec/active-response/bin/firewall-drop"
+        )
 
     with subtest("a response that needs no capability grants none"):
         # execd still runs, because active response is on. It holds nothing,
