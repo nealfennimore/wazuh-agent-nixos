@@ -509,6 +509,20 @@ as a finding.
 The setup unit runs with `PrivateNetwork`. It copies files and reads a
 credential that PID 1 already resolved, so it has no reason to see a network.
 
+`NoExecPaths = [ "/var/ossec" ]` makes the state directory non-executable, so
+a payload staged in `queue`, `logs` or `tmp` cannot run. Two units get a
+carve-out: `wazuh-modulesd` for `wodles`, and `wazuh-execd` for
+`active-response/bin` plus `lib`, because the response binaries map their
+libraries from `/var/ossec/lib` and a noexec mount refuses the mapping. `bin`
+gets no carve-out, so the unsupported `restart-wazuh` response fails at exec.
+
+`wazuh-syscheckd` carries `IPAddressDeny = "any"`, the inverse of its
+`SocketBindDeny` exemption. The rootcheck probe binds and closes without one
+packet, and the manager path runs through `wazuh-agentd` over a Unix socket,
+so syscheckd keeps `bind()` and loses IP traffic. The other daemons keep
+their traffic: a host configuration can point reader commands and wodles at
+the network, and a deny there fails silently.
+
 Four other options are left out on purpose. `ProtectProc`, `ProcSubset`,
 `PrivateUsers` and `PrivatePIDs` each hide or remap other processes. rootcheck
 finds a hidden process by comparison of `kill(pid, 0)` and `getsid(pid)`
@@ -541,3 +555,11 @@ systemd.services.wazuh-syscheckd.serviceConfig.ProtectHome = false;
   `wazuh-control`, which starts daemons outside the supervision systemd
   already provides. `ipfw`, `npf` and `pf` are BSD firewalls, and `kaspersky`
   needs a vendor CLI that is not packaged here.
+- With active response enabled, a local compromise of the `wazuh` user
+  reaches whatever `wazuh-execd` holds. execd reads commands from
+  `queue/alerts/execq`, a socket the `wazuh` user owns, and the response
+  list in `etc/shared/ar.conf` is a file the manager writes through the same
+  user. This is upstream's architecture, and no mount in this module closes
+  it. The read-only code trees raise the cost of that path. They do not
+  remove it. Weigh this in the same place the `disable-account` warning
+  points: what execd holds is what a compromise gains.

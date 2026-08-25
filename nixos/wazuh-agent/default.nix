@@ -167,6 +167,18 @@ let
     ProtectSystem = "strict";
     ReadWritePaths = [ stateDir ];
 
+    # And almost nothing in it is a program to run. The package trees are
+    # read-only (readOnlyPackageDirs below), and this closes the writable
+    # remainder: a payload staged in queue, logs or tmp cannot be executed.
+    # The two daemons that do execute from the state directory get a
+    # carve-out at their unit: wodles for wazuh-modulesd, and
+    # active-response/bin for wazuh-execd. bin gets none on purpose. The
+    # only thing that execs from it is the restart-wazuh response, which
+    # starts daemons outside the supervision systemd already provides, and
+    # its failure lands in logs/active-responses.log where the manager
+    # sees it.
+    NoExecPaths = [ stateDir ];
+
     # read-only, not true. File integrity monitoring must still be able to read
     # /root and /home, which syscheck.directories documents as a reasonable
     # thing to add. ProtectHome = true replaces both with empty directories,
@@ -516,7 +528,43 @@ let
       // optionalAttrs (d != "wazuh-syscheckd") {
         SocketBindDeny = "any";
       }
-      // optionalAttrs (d == "wazuh-execd") execdHardening
+      # The complement of the exemption above. syscheckd must be able to
+      # create and bind sockets for the rootcheck probe, but the probe
+      # closes each socket right after the bind and never sends a packet,
+      # and nothing else in syscheckd or rootcheck uses the network. The
+      # manager path runs through agentd over a Unix socket. So syscheckd
+      # keeps bind() and loses IP traffic. The other daemons keep their
+      # traffic: agentd talks to the manager, and logcollector and modulesd
+      # run reader commands and wodles that a host configuration can point
+      # at the network.
+      // optionalAttrs (d == "wazuh-syscheckd") {
+        IPAddressDeny = "any";
+      }
+      // optionalAttrs (d == "wazuh-modulesd") {
+        # The wodle scripts are the one thing modulesd executes out of the
+        # state directory, and readOnlyPackageDirs already makes the tree
+        # read-only.
+        ExecPaths = [ "-${stateDir}/wodles" ];
+      }
+      // optionalAttrs (d == "wazuh-execd") (
+        execdHardening
+        // {
+          # The response programs are the one thing execd executes out of
+          # the state directory. lib must come along: the response binaries
+          # load their libraries from ${stateDir}/lib through their
+          # $ORIGIN/../../lib rpath, and a noexec mount refuses the
+          # executable mapping, not only execve. lib is read-only through
+          # readOnlyPackageDirs. active-response/bin stays writable for the
+          # lock directories, so writable and executable overlap there,
+          # which is the residual hole the readOnlyPackageDirs note
+          # describes. bin is deliberately not here; see the NoExecPaths
+          # note in the hardening block.
+          ExecPaths = [
+            "-${stateDir}/active-response/bin"
+            "-${stateDir}/lib"
+          ];
+        }
+      )
       // {
         Type = "exec";
 

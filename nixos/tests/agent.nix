@@ -272,6 +272,52 @@ pkgs.testers.runNixOSTest {
         agent.succeed(f"nsenter -t {pid} -m -- touch /var/ossec/logs/probe")
         agent.succeed(f"nsenter -t {pid} -m -- rm /var/ossec/logs/probe")
 
+    with subtest("the state directory does not execute"):
+        for daemon in daemons:
+            nep = agent.succeed(
+                f"systemctl show -p NoExecPaths --value {daemon}.service"
+            )
+            assert "/var/ossec" in nep, f"{daemon}: NoExecPaths is {nep!r}"
+
+        # modulesd is the one daemon on this node with a carve-out, and the
+        # daemons without one must show none.
+        ep = agent.succeed(
+            "systemctl show -p ExecPaths --value wazuh-modulesd.service"
+        )
+        assert "/var/ossec/wodles" in ep, f"modulesd ExecPaths: {ep!r}"
+        for daemon in ["wazuh-agentd", "wazuh-logcollector", "wazuh-syscheckd"]:
+            ep = agent.succeed(
+                f"systemctl show -p ExecPaths --value {daemon}.service"
+            ).strip()
+            assert ep == "", f"{daemon}: ExecPaths is {ep!r}"
+
+        # Enforcement. The same file must run outside the namespace and
+        # refuse inside it, so the refusal is the noexec mount rather than
+        # the file.
+        agent.succeed("cd /var/ossec/bin && ./wazuh-control info -t >/dev/null")
+        pid = agent.succeed(
+            "systemctl show -p MainPID --value wazuh-logcollector.service"
+        ).strip()
+        agent.fail(f"nsenter -t {pid} -m -- /var/ossec/bin/wazuh-control info -t")
+
+    with subtest("syscheckd keeps bind and loses IP traffic"):
+        # The inverse pair of the SocketBindDeny exemption below. The
+        # rootcheck probe binds and closes without one packet
+        # (src/rootcheck/check_rc_ports.c:60-92), and the manager path runs
+        # through agentd over a Unix socket, so syscheckd works with no IP
+        # traffic at all. The other daemons keep their traffic: agentd
+        # talks to the manager, and a host configuration can point reader
+        # commands and wodles at the network.
+        deny = agent.succeed(
+            "systemctl show -p IPAddressDeny --value wazuh-syscheckd.service"
+        ).strip()
+        assert deny != "", "syscheckd has no IPAddressDeny"
+        for daemon in ["wazuh-agentd", "wazuh-logcollector", "wazuh-modulesd"]:
+            deny = agent.succeed(
+                f"systemctl show -p IPAddressDeny --value {daemon}.service"
+            ).strip()
+            assert deny == "", f"{daemon}: IPAddressDeny is {deny!r}"
+
     with subtest("no daemon can bind an IP socket, except syscheckd"):
         # Nothing in an agent listens, so a bind is a compromised daemon
         # opening a listener. The exception: rootcheck runs inside
@@ -518,6 +564,19 @@ pkgs.testers.runNixOSTest {
             "systemctl show -p SocketBindDeny --value wazuh-execd.service"
         ).strip()
         assert "any" in deny, f"execd: SocketBindDeny is {deny!r}"
+
+        # The exec carve-out: the response programs themselves, plus lib,
+        # because the response binaries map their libraries from
+        # /var/ossec/lib through their $ORIGIN/../../lib rpath and a noexec
+        # mount refuses the mapping. bin stays noexec, which is what makes
+        # the unsupported restart-wazuh response fail at exec instead of
+        # starting daemons outside systemd.
+        ep = responder.succeed(
+            "systemctl show -p ExecPaths --value wazuh-execd.service"
+        )
+        assert "/var/ossec/active-response/bin" in ep, f"execd ExecPaths: {ep!r}"
+        assert "/var/ossec/lib" in ep, f"execd cannot map response libraries: {ep!r}"
+        assert "/var/ossec/bin" not in ep, f"execd can exec from bin: {ep!r}"
 
         # Not enabled on the default node, so nothing there was widened.
         agent.fail("test -e /etc/hosts.deny")
