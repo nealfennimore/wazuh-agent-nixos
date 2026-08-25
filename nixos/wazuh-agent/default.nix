@@ -820,6 +820,52 @@ in
       };
     };
 
+    buffer = mkOption {
+      description = ''
+        The agent event buffer, which upstream configures as
+        client_buffer. Events queue here between the collectors and the
+        connection to the manager, so the agent absorbs bursts and
+        survives a slow or absent manager. When the queue fills, the
+        agent drops new events and tells the manager about the loss.
+      '';
+      default = { };
+      type = types.submodule {
+        options = {
+          enable = mkOption {
+            type = types.bool;
+            default = true;
+            description = ''
+              Whether to buffer events. With the buffer off, the agent
+              sends every event directly and loses the flood protection.
+              The default matches upstream.
+            '';
+          };
+
+          queueSize = mkOption {
+            type = types.ints.between 1 100000;
+            default = 5000;
+            example = 20000;
+            description = ''
+              How many events the queue holds. wazuh-agentd rejects a
+              value outside 1 to 100000 and refuses to start
+              (src/config/buffer-config.c), so the type carries the same
+              bounds and a bad value fails at evaluation instead.
+            '';
+          };
+
+          eventsPerSecond = mkOption {
+            type = types.ints.between 1 1000;
+            default = 500;
+            example = 250;
+            description = ''
+              How many buffered events the agent sends per second. The
+              same parser accepts 1 to 1000.
+            '';
+          };
+        };
+      };
+    };
+
     activeResponse = mkOption {
       description = ''
         Active response, which lets the manager tell this agent to act on a

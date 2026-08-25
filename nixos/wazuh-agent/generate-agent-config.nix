@@ -89,6 +89,26 @@ let
         <disabled>${yesNo (!cfg.activeResponse.enable)}</disabled>
       </active-response>'';
 
+  # The agent event buffer. Replace the whole block for the same reason as
+  # active-response below: the template holds five copies of
+  # "<disabled>no</disabled>", so the line alone is not a safe anchor. The
+  # upstream comment line inside the block does not survive; the option
+  # descriptions carry that information now.
+  clientBufferBlock = ''
+    <client_buffer>
+        <!-- Agent buffer options -->
+        <disabled>no</disabled>
+        <queue_size>5000</queue_size>
+        <events_per_second>500</events_per_second>
+      </client_buffer>'';
+
+  clientBufferReplacement = ''
+    <client_buffer>
+        <disabled>${yesNo (!cfg.buffer.enable)}</disabled>
+        <queue_size>${toString cfg.buffer.queueSize}</queue_size>
+        <events_per_second>${toString cfg.buffer.eventsPerSecond}</events_per_second>
+      </client_buffer>'';
+
   # The template gives <server> an address and no port.
   serverAddress = "<address>IP</address>";
   serverAddressAndPort = ''
@@ -174,6 +194,8 @@ pkgs.runCommand "ossec.conf"
                      ${lib.escapeShellArg ignoreLines} \
       --replace-fail ${lib.escapeShellArg activeResponseBlock} \
                      ${lib.escapeShellArg activeResponseReplacement} \
+      --replace-fail ${lib.escapeShellArg clientBufferBlock} \
+                     ${lib.escapeShellArg clientBufferReplacement} \
       --replace-fail ${lib.escapeShellArg serverClose} \
                      ${lib.escapeShellArg serverCloseAndEnrollment}
 
@@ -187,6 +209,13 @@ pkgs.runCommand "ossec.conf"
     test "$(grep -c '<active-response>' ossec.conf)" -eq 1
     grep -A1 '<active-response>' ossec.conf \
       | grep -q '<disabled>${yesNo (!cfg.activeResponse.enable)}</disabled>'
+
+    # Exactly one buffer block, carrying the values the options chose.
+    test "$(grep -c '<client_buffer>' ossec.conf)" -eq 1
+    grep -q '<queue_size>${toString cfg.buffer.queueSize}</queue_size>' ossec.conf
+    grep -q '<events_per_second>${toString cfg.buffer.eventsPerSecond}</events_per_second>' ossec.conf
+    grep -A1 '<client_buffer>' ossec.conf \
+      | grep -q '<disabled>${yesNo (!cfg.buffer.enable)}</disabled>'
 
     # Enrollment verification is opt in, so assert both directions. An empty
     # <enrollment> block would be worse than none: it reads as configured.

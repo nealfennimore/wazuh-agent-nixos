@@ -125,6 +125,9 @@ sudo systemctl restart wazuh.target
 | `sca.scanOnStart` | `true` | Scans when the agent starts. |
 | `sca.interval` | `"12h"` | Time between scans. |
 | `sca.skipNfs` | `true` | Skips NFS mounts during a scan. |
+| `buffer.enable` | `true` | Buffers events between the collectors and the manager link. |
+| `buffer.queueSize` | `5000` | How many events the queue holds. The range is 1 to 100000. |
+| `buffer.eventsPerSecond` | `500` | The send rate out of the queue. The range is 1 to 1000. |
 | `activeResponse.enable` | `false` | Lets the agent act on a finding, not only report it. |
 | `activeResponse.capability.<name>.enable` | see below | Whether that response is provisioned. |
 | `extraConfig` | `""` | XML appended to the generated `ossec.conf`. |
@@ -161,6 +164,29 @@ Policies come from the package at `ruleset/sca`. Upstream installs the set
 that matches the distribution and falls back to
 `sca_distro_independent_linux.yml`, which is what NixOS gets. `preStart`
 copies that directory into `/var/ossec`.
+
+### The agent event buffer
+
+Upstream configures this block as `client_buffer`. Events queue in the
+buffer between the collectors and the connection to the manager, so the
+agent absorbs bursts and survives a slow or absent manager. When the queue
+fills, the agent drops new events and tells the manager about the loss.
+
+Raise `buffer.queueSize` on hosts with bursty logs or a manager behind an
+unreliable link. Raise `buffer.eventsPerSecond` when the queue drains too
+slowly after a burst. `wazuh-agentd` rejects values outside the documented
+ranges and refuses to start, so the option types carry the same bounds and a
+bad value fails at evaluation instead.
+
+```nix
+services.wazuh-agent.buffer = {
+  queueSize = 20000;
+  eventsPerSecond = 250;
+};
+```
+
+Set `buffer.enable = false` to send every event directly. That removes the
+flood protection.
 
 ### Active response
 

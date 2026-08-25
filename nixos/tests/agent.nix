@@ -88,6 +88,11 @@ pkgs.testers.runNixOSTest {
           route-null.enable = false;
           wazuh-slack.enable = true;
         };
+
+        # Non-default values, so the buffer subtest proves the
+        # substitution rather than the template.
+        buffer.queueSize = 20000;
+        buffer.eventsPerSecond = 250;
       };
     };
 
@@ -104,6 +109,7 @@ pkgs.testers.runNixOSTest {
         manager.host = "192.0.2.10";
         activeResponse.enable = true;
         activeResponse.capability.disable-account.enable = true;
+        buffer.enable = false;
       };
     };
 
@@ -701,6 +707,34 @@ pkgs.testers.runNixOSTest {
         # And the escalation must not appear where it was not asked for.
         for node, name in [(agent, "agent"), (responder, "responder"), (notifier, "notifier")]:
             node.fail("systemctl show -p User --value wazuh-execd.service | grep -qx root")
+
+    with subtest("the agent event buffer is configurable"):
+        # The generated replacement drops the template's comment line, so
+        # <disabled> sits directly under <client_buffer> on every node and
+        # grep -A1 reads the value this module chose.
+        conf = "/var/ossec/etc/ossec.conf"
+
+        # The default node carries the upstream defaults.
+        agent.succeed(f"test $(grep -c '<client_buffer>' {conf}) -eq 1")
+        agent.succeed(f"grep -q '<queue_size>5000</queue_size>' {conf}")
+        agent.succeed(f"grep -q '<events_per_second>500</events_per_second>' {conf}")
+        agent.succeed(
+            f"grep -A1 '<client_buffer>' {conf} | grep -q '<disabled>no</disabled>'"
+        )
+
+        # Non-default values reach the file, so the substitution is proven
+        # rather than the template. wazuh-agentd rejects a queue_size over
+        # 100000 at start, and the option type carries the same bounds, so
+        # these values are also ones the daemon accepts.
+        notifier.succeed(f"grep -q '<queue_size>20000</queue_size>' {conf}")
+        notifier.succeed(f"grep -q '<events_per_second>250</events_per_second>' {conf}")
+
+        # Turning the buffer off writes yes into the one block that means
+        # the buffer, not into one of the four other <disabled> elements.
+        disabler.succeed(f"test $(grep -c '<client_buffer>' {conf}) -eq 1")
+        disabler.succeed(
+            f"grep -A1 '<client_buffer>' {conf} | grep -q '<disabled>yes</disabled>'"
+        )
 
     with subtest("enrollment is unverified unless a CA is configured"):
         # Off by default, and the absence must be an absent block rather than
