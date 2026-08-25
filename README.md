@@ -406,11 +406,19 @@ root through `wazuh-control`, the way upstream packages run them. The module
 units and the sandbox are the ground of `checks.agent` and
 `checks.enrollment`.
 
-The default run covers `test_agentd`, `test_enrollment` and `test_execd`.
-These are the agent suites with the fewest host assumptions. To change the
-selection, pass `suites` or `extraPytestFlags` where `flake.nix` imports
-`nixos/tests/integration.nix`. The remaining agent suites are `test_fim`,
-`test_logcollector`, `test_sca` and `test_syscollector`. They run much longer.
+The default run covers every agent-side suite: `test_agentd`,
+`test_enrollment`, `test_execd`, `test_fim`, `test_logcollector`, `test_sca`
+and `test_syscollector`. Expect several hours. `test_fim` is most of that. To
+narrow the selection, pass `suites` or `extraPytestFlags` where `flake.nix`
+imports `nixos/tests/integration.nix`.
+
+A short exclusion list applies to `test_fim`, and it lives in `suiteFlags` in
+`nixos/tests/integration.nix` with a reason on each entry. The exclusions
+fall in two classes. The whodata cases and the audit-rule tests need audit
+infrastructure that NixOS cannot provide, such as the `audisp-af_unix`
+plugin at `/sbin` and the `yum` or `apt` package managers. Three single
+realtime cases lose a timing race inside a VM, and their scheduled
+counterparts cover the same assertions.
 
 The check writes two artifacts per suite into the output: `report-<suite>.xml`
 in JUnit form and `log-<suite>.txt` with the full pytest output. The check

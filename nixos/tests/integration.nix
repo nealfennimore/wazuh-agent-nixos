@@ -30,14 +30,17 @@
 {
   pkgs,
   wazuhModule,
-  # The suites to run. The default holds the agent suites with the fewest
-  # host assumptions. test_fim, test_logcollector, test_sca and
-  # test_syscollector also target agents and can be added here, at the cost
-  # of a much longer run and, likely, more upstream flakiness.
+  # The suites to run. This is every agent-side suite the upstream tree
+  # holds. test_fim dominates the run time. suiteFlags below carries the
+  # per-suite exclusions, with the reason next to each one.
   suites ? [
     "test_agentd"
     "test_enrollment"
     "test_execd"
+    "test_fim"
+    "test_logcollector"
+    "test_sca"
+    "test_syscollector"
   ],
   # Extra arguments for every pytest invocation, for example
   # "--tier 0" or "--deselect test_agentd/test_state/test_agentd_state.py".
@@ -62,14 +65,99 @@ let
         }
       }/tests/integration";
 
+  # Arguments that one suite needs and the others must not see. Each entry
+  # carries the reason it exists. Two classes appear so far: tests that need
+  # audit infrastructure NixOS cannot provide, and single cases that lose a
+  # timing race inside a VM.
+  suiteFlags = {
+    test_fim = builtins.concatStringsSep " " [
+      # whodata mode needs the audit daemon with the audisp-af_unix plugin,
+      # and syscheck_audit.c writes a plugin file that names
+      # /sbin/audisp-af_unix, a path NixOS does not have. The whodata cases
+      # can only time out here, and there are about 165 of them at 30
+      # seconds each, so filter them by their case ids. The three spellings
+      # match the three forms the case names use.
+      "-k 'not whodata and not Whodata and not Who-data'"
+
+      # Removes and reinstalls the audit package with yum or apt, and NixOS
+      # has neither.
+      "--ignore=test_fim/test_files/test_audit"
+
+      # Runs `auditctl -l` from the test body in every mode, and asserts on
+      # the whodata audit rules, so it is audit infrastructure in the same
+      # class as test_audit.
+      "--ignore=test_fim/test_files/test_follow_symbolic_link/test_audit_rules_with_symlink.py"
+
+      # Creates one hundred thousand files and waits for the file-limit log
+      # with a fixed monitor timeout. A VM does not create them in time. The
+      # 80 and 90 percent cases stay, and they cover the same code path.
+      ''--deselect "test_fim/test_files/test_file_limit/test_fill_capacity.py::test_fill_capacity[Default file limit fill 100% - Real-time]"''
+
+      # In realtime mode the baseline snapshot races the writes the test
+      # makes. On a slow VM the baseline lands after the change, diff then
+      # reports no content change, and the assertion on "More changes..."
+      # fails. The scheduled cases cover the same assertion and pass.
+      ''--deselect "test_fim/test_files/test_report_changes/test_disk_quota_disabled.py::test_disk_quota_disabled[Test 'disk_quota' information, fim_mode = realtime]"''
+      ''--deselect "test_fim/test_files/test_report_changes/test_file_size_disabled.py::test_file_size_disabled[Test 'disk_quota' information, fim_mode = realtime]"''
+    ];
+  };
+
   wazuhTesting = pkgs.callPackage ../../pkgs/wazuh-testing.nix { };
   pythonEnv = pkgs.python3.withPackages (_: [ wazuhTesting ]);
 
+  # test_fim/conftest.py holds a session-scoped autouse fixture that
+  # installs auditd with yum or apt and raises ValueError on every other
+  # distribution, which fails every test in the suite before it starts.
+  # Replace the fixture body with a no-op. The whodata cases are the only
+  # ones that need audit, and suiteFlags filters them out.
+  #
+  # The anchors are exact strings, so an upstream change to the fixture
+  # fails this build with a clear message rather than drifting silently.
+  disableInstallAudit = pkgs.writeText "disable-install-audit.py" ''
+    import sys
+    from pathlib import Path
+
+    conftest = Path(sys.argv[1]) / "test_fim" / "conftest.py"
+    text = conftest.read_text()
+    try:
+        start = text.index("def install_audit():")
+        end = text.index("@pytest.fixture()", start)
+    except ValueError:
+        sys.exit(
+            "disable-install-audit: the install_audit fixture moved in "
+            f"{conftest}. Update nixos/tests/integration.nix."
+        )
+    replacement = (
+        "def install_audit():\n"
+        '    """Do nothing. Upstream installs auditd with yum or apt here,\n'
+        "    and the NixOS check filters out the whodata cases, which are\n"
+        "    the only ones that need audit.\n"
+        '    """\n'
+        "\n\n"
+    )
+    conftest.write_text(text[:start] + replacement + text[end:])
+  '';
+
+  patchedTests = pkgs.runCommand "wazuh-integration-tests" { } ''
+    cp -r ${testsSrc} $out
+    chmod -R u+w $out
+    ${pkgs.python3}/bin/python3 ${disableInstallAudit} $out
+  '';
+
   # control_service() runs `service wazuh-agent <action>` and reads the exit
   # code. Map that onto wazuh-control, which is what service(8) reaches on
-  # the distributions upstream tests on.
+  # the distributions upstream tests on. A few fixtures use service(8) for
+  # other units, so anything else goes to systemctl with the argument order
+  # swapped.
   serviceShim = pkgs.writeShellScriptBin "service" ''
-    exec /var/ossec/bin/wazuh-control "$2"
+    case "$1" in
+      wazuh-agent | wazuh-manager)
+        exec /var/ossec/bin/wazuh-control "$2"
+        ;;
+      *)
+        exec systemctl "$2" "$1"
+        ;;
+    esac
   '';
 
   # The real wazuh-control computes DIR as the parent of the current working
@@ -88,8 +176,9 @@ in
 pkgs.testers.runNixOSTest {
   name = "wazuh-agent-integration";
 
-  # The default is one hour, and the suites take longer.
-  globalTimeout = 4 * 3600;
+  # The default is one hour. The full suite list runs for several hours,
+  # and test_fim is most of that.
+  globalTimeout = 12 * 3600;
 
   nodes.agent =
     { pkgs, ... }:
@@ -130,13 +219,16 @@ pkgs.testers.runNixOSTest {
       virtualisation = {
         memorySize = 4096;
         cores = 2;
-        diskSize = 4096;
+        # test_fim writes diff copies under queue/diff and the pytest logs
+        # grow with the case count.
+        diskSize = 8192;
       };
     };
 
   testScript = ''
     suites = ${builtins.toJSON suites}
     extra_pytest_flags = ${builtins.toJSON extraPytestFlags}
+    suite_flags = ${builtins.toJSON suiteFlags}
 
     agent.wait_for_unit("multi-user.target")
     agent.wait_for_file("/var/ossec/etc/ossec.conf", timeout=120)
@@ -173,17 +265,18 @@ pkgs.testers.runNixOSTest {
 
     # The store copy is read only, and pytest writes reports and caches into
     # the test tree.
-    agent.succeed("cp -r --no-preserve=mode ${testsSrc} /root/integration")
+    agent.succeed("cp -r --no-preserve=mode ${patchedTests} /root/integration")
 
     failures = {}
     for suite in suites:
         with subtest(f"pytest {suite}"):
             agent.log(f"{suite} runs now. Expect a long wait.")
+            flags = (extra_pytest_flags + " " + suite_flags.get(suite, "")).strip()
             status, _ = agent.execute(
                 "cd /root/integration &&"
                 " WAZUH_HOME=/var/ossec PYTHONDONTWRITEBYTECODE=1"
                 f" python3 -m pytest {suite} -v --tb=short"
-                f" --junitxml=report-{suite}.xml {extra_pytest_flags}"
+                f" --junitxml=report-{suite}.xml {flags}"
                 f" > log-{suite}.txt 2>&1",
                 timeout=None,
             )
