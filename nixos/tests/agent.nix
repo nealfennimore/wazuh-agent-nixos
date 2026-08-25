@@ -250,55 +250,121 @@ pkgs.testers.runNixOSTest {
             agent.succeed(f"systemctl is-active {daemon}.service")
 
     with subtest("the package code is read-only inside the units"):
+        # The read-only guarantee rests on ProtectSystem = "strict": the
+        # package trees have no mounts of their own, and the root of the
+        # namespace is read-only. Only the state directories get a writable
+        # bind. The writableStateDirs note in the module explains the
+        # direction: the kernel detaches a mount whose mountpoint directory
+        # is deleted, the setup refresh used to delete the package
+        # directories, and a lost read-only mount fails open.
+        writable = [
+            "/var/ossec/etc",
+            "/var/ossec/logs",
+            "/var/ossec/queue",
+            "/var/ossec/var",
+            "/var/ossec/tmp",
+            "/var/ossec/active-response",
+        ]
         for daemon in daemons:
+            rwp = agent.succeed(
+                f"systemctl show -p ReadWritePaths --value {daemon}.service"
+            )
+            for path in writable:
+                assert path in rwp, f"{daemon}: {path} is not writable: {rwp!r}"
             ro = agent.succeed(
                 f"systemctl show -p ReadOnlyPaths --value {daemon}.service"
-            )
-            for tree in ["bin", "lib", "ruleset", "wodles", "agentless"]:
-                assert (
-                    f"/var/ossec/{tree}" in ro
-                ), f"{daemon}: /var/ossec/{tree} is not read-only: {ro!r}"
+            ).strip()
+            assert ro == "", f"{daemon}: unexpected ReadOnlyPaths {ro!r}"
 
-        # Enforcement, not only configuration. Enter the mount namespace of
-        # a running daemon as root: the package trees must refuse the write
-        # and the state directories must still take one. A read-only bind
-        # mount refuses root too, so a pass here proves the mount rather
-        # than a permission bit.
+        # The mount table of the daemon's namespace, read from the host
+        # through /proc/<pid>/mountinfo. Field five is the mount point and
+        # field six holds the per-mount flags. The daemon must not share
+        # the host namespace, the root must be read-only, every writable
+        # state directory must be a mount that is writable and noexec, and
+        # no mount that makes a package tree writable is tolerated.
         pid = agent.succeed(
             "systemctl show -p MainPID --value wazuh-logcollector.service"
         ).strip()
-        agent.fail(f"nsenter -t {pid} -m -- touch /var/ossec/bin/probe")
-        agent.fail("test -e /var/ossec/bin/probe")
-        agent.succeed(f"nsenter -t {pid} -m -- touch /var/ossec/logs/probe")
-        agent.succeed(f"nsenter -t {pid} -m -- rm /var/ossec/logs/probe")
+        host_ns = agent.succeed("readlink /proc/1/ns/mnt").strip()
+        unit_ns = agent.succeed(f"readlink /proc/{pid}/ns/mnt").strip()
+        assert host_ns != unit_ns, "logcollector shares the host mount namespace"
 
-    with subtest("the state directory does not execute"):
+        mountinfo = agent.succeed(f"cat /proc/{pid}/mountinfo")
+        agent.log("logcollector namespace mounts under /var/ossec:")
+        for line in mountinfo.splitlines():
+            if "/var/ossec" in line:
+                agent.log(f"  {line}")
+
+        def mount_state(path):
+            """The (root, options) of the top mount at path, or None."""
+            found = [
+                (f[3], f[5])
+                for f in (l.split() for l in mountinfo.splitlines())
+                if len(f) > 5 and f[4] == path
+            ]
+            return found[-1] if found else None
+
+        root_state = mount_state("/")
+        assert root_state and root_state[1].split(",")[0] == "ro", (
+            f"the namespace root is not read-only: {root_state}"
+        )
+        for path in writable:
+            state = mount_state(path)
+            assert state, f"{path} is not a mount in the namespace"
+            flags = state[1].split(",")
+            assert flags[0] == "rw", f"{path} mounted {state[1]}"
+            assert "noexec" in flags, f"{path} lacks noexec: {state[1]}"
+        for tree in ["bin", "lib", "ruleset", "wodles", "agentless"]:
+            state = mount_state(f"/var/ossec/{tree}")
+            assert state is None or state[1].split(",")[0] == "ro", (
+                f"/var/ossec/{tree} is writable through a mount: {state}"
+            )
+
+        # The write itself. Enter the namespace as root: the package trees
+        # must refuse the write and the state directories must still take
+        # one. A read-only mount refuses root too, so a pass here proves
+        # the mount rather than a permission bit.
+        #
+        # -r and -w are load-bearing. setns() alone keeps the caller's root
+        # directory, so an absolute path keeps resolving through the host
+        # namespace, where /var/ossec/bin is writable, and the probe tests
+        # nothing. With no argument the two flags take the root and working
+        # directory of the target process.
+        agent.fail(f"nsenter -t {pid} -m -r -w -- touch /var/ossec/bin/probe")
+        agent.fail("test -e /var/ossec/bin/probe")
+        agent.succeed(f"nsenter -t {pid} -m -r -w -- touch /var/ossec/logs/probe")
+        agent.succeed(f"nsenter -t {pid} -m -r -w -- rm /var/ossec/logs/probe")
+
+    with subtest("writable state does not execute, read-only code does"):
         for daemon in daemons:
             nep = agent.succeed(
                 f"systemctl show -p NoExecPaths --value {daemon}.service"
             )
-            assert "/var/ossec" in nep, f"{daemon}: NoExecPaths is {nep!r}"
-
-        # modulesd is the one daemon on this node with a carve-out, and the
-        # daemons without one must show none.
-        ep = agent.succeed(
-            "systemctl show -p ExecPaths --value wazuh-modulesd.service"
-        )
-        assert "/var/ossec/wodles" in ep, f"modulesd ExecPaths: {ep!r}"
-        for daemon in ["wazuh-agentd", "wazuh-logcollector", "wazuh-syscheckd"]:
+            for path in writable:
+                assert path in nep, f"{daemon}: {path} is not noexec: {nep!r}"
+            # No daemon on this node has an exec carve-out. Only execd gets
+            # one, for active-response/bin, and the responder node asserts
+            # it.
             ep = agent.succeed(
                 f"systemctl show -p ExecPaths --value {daemon}.service"
             ).strip()
             assert ep == "", f"{daemon}: ExecPaths is {ep!r}"
 
-        # Enforcement. The same file must run outside the namespace and
-        # refuse inside it, so the refusal is the noexec mount rather than
-        # the file.
-        agent.succeed("cd /var/ossec/bin && ./wazuh-control info -t >/dev/null")
-        pid = agent.succeed(
-            "systemctl show -p MainPID --value wazuh-logcollector.service"
-        ).strip()
-        agent.fail(f"nsenter -t {pid} -m -- /var/ossec/bin/wazuh-control info -t")
+        # A staged payload must run outside the namespace and refuse inside
+        # it, so the refusal is the noexec mount rather than the file. The
+        # package copy of wazuh-control must keep running inside the
+        # namespace: the read-only trees stay executable, which is what the
+        # response binaries need to map their libraries.
+        agent.succeed(
+            "printf '#!/bin/sh\\nexit 0\\n' > /var/ossec/logs/probe.sh"
+            " && chmod 755 /var/ossec/logs/probe.sh"
+        )
+        agent.succeed("/var/ossec/logs/probe.sh")
+        agent.fail(f"nsenter -t {pid} -m -r -w -- /var/ossec/logs/probe.sh")
+        agent.succeed("rm /var/ossec/logs/probe.sh")
+        agent.succeed(
+            f"nsenter -t {pid} -m -r -w -- /var/ossec/bin/wazuh-control info -t"
+        )
 
     with subtest("syscheckd keeps bind and loses IP traffic"):
         # The inverse pair of the SocketBindDeny exemption below. The
@@ -546,37 +612,36 @@ pkgs.testers.runNixOSTest {
         responder.succeed("runuser -u wazuh -- test -w /etc/hosts.deny")
 
         # execd is the unit that runs manager-supplied commands, so the
-        # read-only code trees matter most here. The active response
-        # binaries load their libraries from /var/ossec/lib through their
-        # $ORIGIN/../../lib rpath, and that tree must not be writable to
-        # the user the other daemons run as. active-response itself must
-        # stay writable: firewall-drop and host-deny keep their lock
-        # directories inside active-response/bin.
+        # read-only code trees matter most here. Those trees hold no mount
+        # of their own: the strict root keeps them read-only, so the unit
+        # must carry no ReadOnlyPaths at all, and its writable set must be
+        # the state directories, with active-response among them for the
+        # lock directories that firewall-drop and host-deny keep inside
+        # active-response/bin.
         ro = responder.succeed(
             "systemctl show -p ReadOnlyPaths --value wazuh-execd.service"
-        )
-        for tree in ["bin", "lib", "wodles"]:
-            assert f"/var/ossec/{tree}" in ro, f"execd: {tree} is writable: {ro!r}"
+        ).strip()
+        assert ro == "", f"execd: unexpected ReadOnlyPaths {ro!r}"
         assert (
-            "/var/ossec/active-response" not in ro
-        ), f"execd: active-response is read-only, the response locks break: {ro!r}"
+            "/var/ossec/active-response" in rwp
+        ), f"execd: active-response is not writable, the response locks break: {rwp!r}"
         deny = responder.succeed(
             "systemctl show -p SocketBindDeny --value wazuh-execd.service"
         ).strip()
         assert "any" in deny, f"execd: SocketBindDeny is {deny!r}"
 
-        # The exec carve-out: the response programs themselves, plus lib,
-        # because the response binaries map their libraries from
-        # /var/ossec/lib through their $ORIGIN/../../lib rpath and a noexec
-        # mount refuses the mapping. bin stays noexec, which is what makes
-        # the unsupported restart-wazuh response fail at exec instead of
-        # starting daemons outside systemd.
+        # The one exec carve-out in the module: the response programs live
+        # in a writable directory, so execd alone executes out of one.
+        # lib needs no carve-out. It is read-only through the strict root,
+        # and a read-only tree keeps the execute bit, which is what the
+        # response binaries need to map their libraries through their
+        # $ORIGIN/../../lib rpath.
         ep = responder.succeed(
             "systemctl show -p ExecPaths --value wazuh-execd.service"
         )
         assert "/var/ossec/active-response/bin" in ep, f"execd ExecPaths: {ep!r}"
-        assert "/var/ossec/lib" in ep, f"execd cannot map response libraries: {ep!r}"
-        assert "/var/ossec/bin" not in ep, f"execd can exec from bin: {ep!r}"
+        assert "/var/ossec/lib" not in ep, f"needless lib carve-out: {ep!r}"
+        assert "/var/ossec/bin" not in ep, f"needless bin carve-out: {ep!r}"
 
         # Not enabled on the default node, so nothing there was widened.
         agent.fail("test -e /etc/hosts.deny")

@@ -43,8 +43,9 @@ The NixOS module supplies its own package. The overlay is optional.
    sudo nixos-rebuild switch
    ```
 
-The agent enrolls once, then writes `/var/ossec/.agent-registered`. Delete that
-file to force a new enrollment.
+The agent enrolls once, then writes `/var/ossec/var/.agent-registered`. Delete
+that file to force a new enrollment. Older versions wrote
+`/var/ossec/.agent-registered`, and an existing marker there still counts.
 
 `examples/` holds a complete flake and a commented host configuration.
 
@@ -98,7 +99,8 @@ matches the port that `authd` listens on.
 To enroll again after a failure, delete the marker file and restart the unit.
 
 ```bash
-sudo rm -f /var/ossec/.agent-registered /var/ossec/etc/client.keys
+sudo rm -f /var/ossec/var/.agent-registered /var/ossec/.agent-registered \
+  /var/ossec/etc/client.keys
 sudo systemctl restart wazuh-agent-auth
 sudo systemctl restart wazuh.target
 ```
@@ -490,15 +492,30 @@ is-active` cannot see that. The check asserts that syscollector, SCA,
 rootcheck and file integrity monitoring each reach their own end line, and
 that no daemon died of a blocked syscall.
 
-The package trees under `/var/ossec` are read-only inside every daemon unit:
-`bin`, `lib`, `ruleset`, `wodles` and `agentless`. The setup unit owns those
-copies as the `wazuh` user, so without the mounts every daemon can rewrite
+Inside every daemon unit, only the state directories are writable: `etc`,
+`logs`, `queue`, `var`, `tmp` and `active-response`. Everything else under
+`/var/ossec`, including the package trees `bin`, `lib`, `ruleset`, `wodles`
+and `agentless`, stays read-only through the strict root. The setup unit owns
+those copies as the `wazuh` user, so without this every daemon can rewrite
 code that later runs. The path that matters is `wazuh-execd`: the active
 response binaries load their libraries from `/var/ossec/lib` through their
 `$ORIGIN/../../lib` rpath, and `restart-wazuh` execs `bin/wazuh-control`.
 `active-response` stays writable, because `firewall-drop` and `host-deny`
 create their lock directories inside `active-response/bin`. That is the
 residual gap, and closing it needs root-owned package trees.
+
+The direction of that list is deliberate. An earlier version kept `/var/ossec`
+writable and stacked `ReadOnlyPaths` mounts over the package trees.
+`checks.agent` caught those mounts vanishing, and the mechanism is the
+kernel: deleting a mountpoint directory detaches the mounts every namespace
+holds on it, and the setup unit deleted exactly those directories on every
+activation during its refresh. A lost read-only mount fails open and says
+nothing. A lost writable bind fails closed: the daemon cannot write its
+state, and says so. The read-only guarantee therefore rests on the root
+remount, the setup refresh replaces directory contents and keeps the
+directory inodes, and the setup unit uses `ProtectSystem = "full"` with no
+`/var/ossec` bind at all, so nothing it mounts can leak into a daemon
+namespace through peer-group propagation.
 
 `SocketBindDeny = "any"` is set on every unit except `wazuh-syscheckd`.
 Nothing in an agent listens, so a bind is a compromised daemon that opens a
@@ -509,12 +526,12 @@ as a finding.
 The setup unit runs with `PrivateNetwork`. It copies files and reads a
 credential that PID 1 already resolved, so it has no reason to see a network.
 
-`NoExecPaths = [ "/var/ossec" ]` makes the state directory non-executable, so
-a payload staged in `queue`, `logs` or `tmp` cannot run. Two units get a
-carve-out: `wazuh-modulesd` for `wodles`, and `wazuh-execd` for
-`active-response/bin` plus `lib`, because the response binaries map their
-libraries from `/var/ossec/lib` and a noexec mount refuses the mapping. `bin`
-gets no carve-out, so the unsupported `restart-wazuh` response fails at exec.
+The writable state directories all carry `noexec`, so writable and executable
+never overlap: a payload staged in `queue`, `logs` or `tmp` cannot run, and
+the read-only trees stay executable, which the response binaries need for
+their library mappings. The one exception is `wazuh-execd`, whose `ExecPaths`
+carve-out keeps `active-response/bin` executable. That directory is both
+writable and executable, and it is the residual gap named above.
 
 `wazuh-syscheckd` carries `IPAddressDeny = "any"`, the inverse of its
 `SocketBindDeny` exemption. The rootcheck probe binds and closes without one

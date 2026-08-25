@@ -107,7 +107,7 @@ pkgs.testers.runNixOSTest {
         # markRegistered writes no marker when client.keys is empty, so
         # ConditionPathExists does not skip this attempt.
         agent.succeed("systemctl restart wazuh-agent-auth.service")
-        agent.wait_for_file("/var/ossec/.agent-registered", timeout=180)
+        agent.wait_for_file("/var/ossec/var/.agent-registered", timeout=180)
         agent.succeed("test -s /var/ossec/etc/client.keys")
 
         # The manager's own copy is the independent evidence. authd appends

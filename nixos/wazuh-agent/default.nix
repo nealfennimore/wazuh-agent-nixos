@@ -68,16 +68,26 @@ let
     "shared"
   ];
 
+  # The refresh below replaces the contents of each package directory and
+  # keeps the directory inode itself. Do not change this back to a
+  # `rm -rf` of the directory. The kernel detaches a mount from every
+  # mount namespace when its mountpoint directory is deleted, every daemon
+  # unit holds a writable bind on active-response, and this unit runs
+  # again in any transaction that starts a daemon. Deleting the directory
+  # therefore unmounted active-response from every running daemon, and the
+  # daemons lost their writable bind, silently, until their next restart.
   preStart = ''
     ${concatMapStringsSep "\n" (dir: ''
-      rm -rf ${stateDir}/${dir}
-      cp -R --no-preserve=ownership,mode ${pkg}/${dir} ${stateDir}/${dir}
+      mkdir -p ${stateDir}/${dir}
+      find ${stateDir}/${dir} -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+      cp -R --no-preserve=ownership,mode ${pkg}/${dir}/. ${stateDir}/${dir}/
     '') packageDirs}
 
     ${concatMapStringsSep "\n" (dir: ''
       if [ -d ${pkg}/${dir} ]; then
-        rm -rf ${stateDir}/${dir}
-        cp -R --no-preserve=ownership,mode ${pkg}/${dir} ${stateDir}/${dir}
+        mkdir -p ${stateDir}/${dir}
+        find ${stateDir}/${dir} -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+        cp -R --no-preserve=ownership,mode ${pkg}/${dir}/. ${stateDir}/${dir}/
       fi
     '') optionalPackageDirs}
 
@@ -148,6 +158,45 @@ let
   ]
   ++ optional cfg.activeResponse.enable "wazuh-execd";
 
+  # The directories under /var/ossec that the daemons write. Everything
+  # else in the state directory, including the package trees bin, lib,
+  # ruleset, wodles and agentless, stays read-only through ProtectSystem =
+  # "strict": the root of the namespace is read-only, and only these paths
+  # get a writable bind mount.
+  #
+  # The list points in this direction on purpose. An earlier version kept
+  # the whole of /var/ossec writable and stacked ReadOnlyPaths mounts over
+  # the package trees. checks.agent caught those mounts vanishing, and the
+  # mechanism is the kernel: deleting a mountpoint directory detaches the
+  # mounts every namespace holds on it, and setup-pre-wazuh deleted
+  # exactly those directories on every activation during its refresh. A
+  # detached read-only mount fails open, silently. A detached writable
+  # bind fails closed: the daemon cannot write its state, and says so. So
+  # the read-only guarantee rests on the root remount, which nothing
+  # detaches, the writable binds sit on directories the refresh keeps (see
+  # the note at preStart), and only the writable side depends on child
+  # mounts at all.
+  #
+  # The same list carries NoExecPaths, so writable and executable never
+  # overlap. One exception: wazuh-execd gets an ExecPaths carve-out for
+  # active-response/bin, where the response programs live and where
+  # firewall-drop and host-deny create their lock directories (LOCK_PATH
+  # in src/active-response/firewalls/default-firewall-drop.c). That
+  # overlap is the residual hole, and closing it needs root-owned package
+  # trees, which means a root setup unit, and that trade is not taken
+  # here. The package trees themselves stay executable: the response
+  # binaries load their libraries from lib through their $ORIGIN/../../lib
+  # rpath (src/Makefile:189), and a read-only tree with the execute bit is
+  # exactly what they need.
+  writableStateDirs = map (dir: "${stateDir}/${dir}") [
+    "etc"
+    "logs"
+    "queue"
+    "var"
+    "tmp"
+    "active-response"
+  ];
+
   # Sandboxing shared by every unit in this module.
   #
   # Read the "deliberately absent" list at the bottom before adding to this.
@@ -163,21 +212,14 @@ let
     AmbientCapabilities = [ "" ];
     NoNewPrivileges = true;
 
-    # /var/ossec is the only thing the agent writes.
+    # The state directories are the only thing the agent writes, and
+    # nothing writable is a program to run: a payload staged in queue,
+    # logs or tmp cannot be executed. The package trees stay read-only
+    # through the strict root. See the writableStateDirs note above for
+    # why the writable side is the enumerated one.
     ProtectSystem = "strict";
-    ReadWritePaths = [ stateDir ];
-
-    # And almost nothing in it is a program to run. The package trees are
-    # read-only (readOnlyPackageDirs below), and this closes the writable
-    # remainder: a payload staged in queue, logs or tmp cannot be executed.
-    # The two daemons that do execute from the state directory get a
-    # carve-out at their unit: wodles for wazuh-modulesd, and
-    # active-response/bin for wazuh-execd. bin gets none on purpose. The
-    # only thing that execs from it is the restart-wazuh response, which
-    # starts daemons outside the supervision systemd already provides, and
-    # its failure lands in logs/active-responses.log where the manager
-    # sees it.
-    NoExecPaths = [ stateDir ];
+    ReadWritePaths = writableStateDirs;
+    NoExecPaths = writableStateDirs;
 
     # read-only, not true. File integrity monitoring must still be able to read
     # /root and /home, which syscheck.directories documents as a reasonable
@@ -248,41 +290,6 @@ let
   # SystemCallFilter, MemoryDenyWriteExecute, RestrictAddressFamilies and
   # PrivateDevices are no longer in this list. They are applied above, and the
   # note there says what tests them.
-
-  # The package trees the daemons execute from or load libraries out of,
-  # made read-only inside every daemon unit.
-  #
-  # setup-pre-wazuh installs these owned by the wazuh user, and
-  # ReadWritePaths above makes the whole state directory writable, so
-  # without this every daemon can rewrite code that later runs. The unit
-  # that makes this matter is wazuh-execd. The active response binaries
-  # carry an rpath of $ORIGIN/../../lib (src/Makefile:189), so the copies
-  # under active-response/bin load their libraries from /var/ossec/lib, and
-  # the restart-wazuh response execs bin/wazuh-control. Both paths are
-  # read-only now, so a compromise of the wazuh user inside any daemon
-  # cannot feed code to the one unit that can hold a capability or root.
-  #
-  # active-response is not in this list, and that is the residual hole.
-  # firewall-drop and host-deny create their lock directories inside
-  # active-response/bin (LOCK_PATH in
-  # src/active-response/firewalls/default-firewall-drop.c), so a read-only
-  # mount there breaks both responses. Closing it needs root-owned package
-  # trees, which means a root setup unit, and that trade is not taken here.
-  #
-  # A WPK upgrade pushed by the manager rewrites bin, so it now fails
-  # against the read-only mount instead of replacing half a tree. On NixOS
-  # that is correct either way: the store owns the binaries, and
-  # setup-pre-wazuh rewrites the copies on every activation.
-  #
-  # The leading dash tolerates absence. ruleset is optional in the package,
-  # and a missing path must not fail the mount namespace.
-  readOnlyPackageDirs = map (dir: "-${stateDir}/${dir}") [
-    "bin"
-    "lib"
-    "ruleset"
-    "wodles"
-    "agentless"
-  ];
 
   # What each active response needs, granted per response rather than as one
   # block. Only wazuh-execd runs them, so nothing here reaches another unit.
@@ -483,9 +490,9 @@ let
       AmbientCapabilities = execdCapabilities;
     }
     // optionalAttrs (gather "readWritePaths" != [ ]) {
-      # This replaces the shared value rather than adding to it, so stateDir
-      # has to come along.
-      ReadWritePaths = [ stateDir ] ++ gather "readWritePaths";
+      # This replaces the shared value rather than adding to it, so the
+      # state directories have to come along.
+      ReadWritePaths = writableStateDirs ++ gather "readWritePaths";
     };
 
   mkService = d: {
@@ -516,9 +523,6 @@ let
 
     serviceConfig =
       hardening
-      // {
-        ReadOnlyPaths = readOnlyPackageDirs;
-      }
       # No agent daemon binds an IP socket, so a bind is a compromised
       # daemon opening a listener. One exception: rootcheck runs inside
       # wazuh-syscheckd and detects an open port by bind() failing on it
@@ -540,29 +544,17 @@ let
       // optionalAttrs (d == "wazuh-syscheckd") {
         IPAddressDeny = "any";
       }
-      // optionalAttrs (d == "wazuh-modulesd") {
-        # The wodle scripts are the one thing modulesd executes out of the
-        # state directory, and readOnlyPackageDirs already makes the tree
-        # read-only.
-        ExecPaths = [ "-${stateDir}/wodles" ];
-      }
       // optionalAttrs (d == "wazuh-execd") (
         execdHardening
         // {
           # The response programs are the one thing execd executes out of
-          # the state directory. lib must come along: the response binaries
-          # load their libraries from ${stateDir}/lib through their
-          # $ORIGIN/../../lib rpath, and a noexec mount refuses the
-          # executable mapping, not only execve. lib is read-only through
-          # readOnlyPackageDirs. active-response/bin stays writable for the
-          # lock directories, so writable and executable overlap there,
-          # which is the residual hole the readOnlyPackageDirs note
-          # describes. bin is deliberately not here; see the NoExecPaths
-          # note in the hardening block.
-          ExecPaths = [
-            "-${stateDir}/active-response/bin"
-            "-${stateDir}/lib"
-          ];
+          # a writable directory. This is the one place where writable and
+          # executable overlap; the writableStateDirs note explains the
+          # residual hole and the lock directories that force it. The
+          # read-only trees need no carve-out: the strict root leaves them
+          # executable, which is what the response binaries need to map
+          # their libraries out of lib.
+          ExecPaths = [ "-${stateDir}/active-response/bin" ];
         }
       )
       // {
@@ -1025,7 +1017,14 @@ in
         };
 
         unitConfig = {
-          ConditionPathExists = "!${stateDir}/.agent-registered";
+          # The marker lives in var, one of the writable state directories.
+          # Earlier versions wrote it to the state directory root, which is
+          # read-only now, so both paths are honored: the unit is skipped
+          # when either exists.
+          ConditionPathExists = [
+            "!${stateDir}/.agent-registered"
+            "!${stateDir}/var/.agent-registered"
+          ];
         };
 
         serviceConfig =
@@ -1059,7 +1058,7 @@ in
                 echo "wazuh-agent-auth: enrollment did not complete. Not marking it done." >&2
                 exit 1
               fi
-              touch ${stateDir}/.agent-registered
+              touch ${stateDir}/var/.agent-registered
             '';
           in
           hardening
@@ -1068,9 +1067,9 @@ in
             User = wazuhUser;
             Group = wazuhGroup;
             # Same grounds as the daemon units. agent-auth writes
-            # etc/client.keys, which is outside the package trees, and it
-            # connects out without binding.
-            ReadOnlyPaths = readOnlyPackageDirs;
+            # etc/client.keys and the enrollment marker under var, both
+            # inside the writable state directories, and it connects out
+            # without binding.
             SocketBindDeny = "any";
             ExecStart =
               "${pkg}/bin/agent-auth -m ${host} -p ${toString cfg.registration.port}"
@@ -1097,10 +1096,28 @@ in
           Group = wazuhGroup;
           # This unit copies files and reads a credential that PID 1 already
           # resolved. It has no reason to see a network at all.
-          #
-          # readOnlyPackageDirs is deliberately absent here: this is the
-          # unit that refreshes those trees.
           PrivateNetwork = true;
+
+          # This is the unit that refreshes the package trees, so it must
+          # write the whole state directory. It gets that through "full"
+          # rather than through a ReadWritePaths bind over /var/ossec: on
+          # systemd 261, sandbox mounts of units that start together
+          # propagate between the namespaces under construction, and a
+          # writable /var/ossec bind that lands in a daemon namespace
+          # covers the package trees the daemon must not write. "full"
+          # keeps /etc and the vendor trees read-only and creates no mount
+          # under /var at all, so this unit has nothing to leak. The
+          # wazuh user's own permissions bound what it can touch besides
+          # the state directory.
+          #
+          # NoExecPaths must be empty here too, and not only for the leak.
+          # On the first boot this unit is what creates the state
+          # directories, and a namespace entry that names a directory
+          # which does not exist yet fails the unit with status
+          # 226/NAMESPACE before one file is copied.
+          ProtectSystem = "full";
+          ReadWritePaths = [ ];
+          NoExecPaths = [ ];
           LoadCredential = optional (cfg.agentAuthPasswordFile != null) (
             "${enrollmentPasswordCredential}:${toString cfg.agentAuthPasswordFile}"
           );
