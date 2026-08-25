@@ -320,7 +320,29 @@ stdenv.mkDerivation {
       --replace-warn "Xroot" "Xnixbld"
     chmod u+x install.sh
 
+    # unpackPhase copies the sources with --no-preserve=all, which drops
+    # every execute bit. InstallCommon runs ./init/fw-check.sh, and on Linux
+    # that script copies default-firewall-drop to firewall-drop for the
+    # install line that follows. Without the bit the call fails, install.sh
+    # carries on, and the package ships without firewall-drop. At runtime
+    # that miss is silent: ReadExecConfig blanks an ar.conf entry whose
+    # binary it cannot open (os_execd/exec.c), and execd returns on the
+    # blank without one log line (os_execd/execd.c:270). The integration
+    # suite found it as four firewall-drop tests that time out.
+    chmod u+x src/init/fw-check.sh
+
     INSTALLDIR=$out USER_DIR=$out ./install.sh binary-install
+
+    # Prove the copy happened rather than trust it. install.sh does not stop
+    # on a failed step, and the failure mode above reaches the agent with no
+    # error anywhere.
+    for response in firewall-drop restart-wazuh route-null wazuh-slack \
+                    host-deny disable-account; do
+      if [ ! -f "$out/active-response/bin/$response" ]; then
+        echo "installPhase: active-response/bin/$response is missing." >&2
+        exit 1
+      fi
+    done
 
     substituteInPlace $out/bin/wazuh-control \
       --replace-fail "cd ''${LOCAL}" "#"

@@ -93,6 +93,20 @@
           inherit pkgs wazuhModule;
         };
 
+        # The upstream integration suites, run by pytest inside one VM. The
+        # suite controls the daemons itself, so this check proves the built
+        # binaries rather than the module. It is slow. The file documents the
+        # shims it needs and takes the suite list and extra pytest flags as
+        # arguments.
+        checks.integration = import ./nixos/tests/integration.nix {
+          inherit pkgs wazuhModule;
+        };
+
+        # The wazuh_testing package on its own, so a broken build or a stale
+        # source hash surfaces in seconds instead of at VM start:
+        #   nix build .#wazuh-testing
+        packages.wazuh-testing = pkgs.callPackage ./pkgs/wazuh-testing.nix { };
+
         # `.envrc` runs `use flake`. Without this shell, direnv falls back to
         # the build environment of packages.default, which pulls the whole
         # dependency closure to open a prompt.

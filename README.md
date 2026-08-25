@@ -389,6 +389,48 @@ The check reads the manager's archive file and never reads an index, the two
 extra images are much larger than the manager image, and the indexer needs a
 TLS certificate set that this repository does not hold.
 
+## Run the upstream integration suites
+
+```bash
+nix build .#checks.x86_64-linux.integration
+```
+
+This check boots one VM and runs the upstream integration tests from
+`modules/wazuh/tests/integration` with `pytest`. The test framework comes from
+[wazuh/qa-integration-framework](https://github.com/wazuh/qa-integration-framework),
+which `pkgs/wazuh-testing.nix` builds at the tag that matches the submodule.
+
+The suite proves the built binaries, not the NixOS module. The suite stops the
+module's systemd units, rewrites `ossec.conf` per test, and runs the daemons as
+root through `wazuh-control`, the way upstream packages run them. The module
+units and the sandbox are the ground of `checks.agent` and
+`checks.enrollment`.
+
+The default run covers `test_agentd`, `test_enrollment` and `test_execd`.
+These are the agent suites with the fewest host assumptions. To change the
+selection, pass `suites` or `extraPytestFlags` where `flake.nix` imports
+`nixos/tests/integration.nix`. The remaining agent suites are `test_fim`,
+`test_logcollector`, `test_sca` and `test_syscollector`. They run much longer.
+
+The check writes two artifacts per suite into the output: `report-<suite>.xml`
+in JUnit form and `log-<suite>.txt` with the full pytest output. The check
+fails when any suite reports a failure.
+
+Expect friction on the first runs. The suites assume an upstream package
+installation, and three shims in `nixos/tests/integration.nix` bridge the
+differences. That file documents each shim. A test that fails on an
+environment assumption rather than on agent behavior belongs in
+`extraPytestFlags` as a `--deselect` entry.
+
+To confirm the framework package alone, build it first:
+
+```bash
+nix build .#wazuh-testing
+```
+
+If the build reports a hash mismatch for the source, copy the hash from the
+error message into `pkgs/wazuh-testing.nix`.
+
 ## Build the package alone
 
 ```bash
