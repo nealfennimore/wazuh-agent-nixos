@@ -287,6 +287,17 @@ let
   # unreadable, and syscheck logs no error when it monitors an empty
   # directory. read-only above keeps those two usable as FIM targets.
   #
+  # SocketBindDeny is absent because Wazuh binds on purpose before every
+  # outbound connection. OS_Connect in src/os_net/os_net.c binds the
+  # client socket to INADDR_ANY port 0 ("Force a new ephemeral port
+  # before connecting") before it calls connect, for TCP and UDP and for
+  # both address families. A bind deny therefore cuts the agent off from
+  # its manager: checks.enrollment failed with "(1208): Unable to connect
+  # to enrollment service" in agent-auth and agentd alike. Allowing only
+  # the port-0 bind is no fix, because a compromised daemon can bind port
+  # 0 and listen on whatever ephemeral port it gets, which is the exact
+  # thing the deny was for.
+  #
   # SystemCallFilter, MemoryDenyWriteExecute, RestrictAddressFamilies and
   # PrivateDevices are no longer in this list. They are applied above, and the
   # note there says what tests them.
@@ -523,24 +534,15 @@ let
 
     serviceConfig =
       hardening
-      # No agent daemon binds an IP socket, so a bind is a compromised
-      # daemon opening a listener. One exception: rootcheck runs inside
-      # wazuh-syscheckd and detects an open port by bind() failing on it
-      # (src/rootcheck/check_rc_ports.c:79). Denying binds there does not
-      # stop the daemon, it turns every port on the host into a finding,
-      # and the generated configuration ships rootcheck enabled.
-      // optionalAttrs (d != "wazuh-syscheckd") {
-        SocketBindDeny = "any";
-      }
-      # The complement of the exemption above. syscheckd must be able to
-      # create and bind sockets for the rootcheck probe, but the probe
-      # closes each socket right after the bind and never sends a packet,
-      # and nothing else in syscheckd or rootcheck uses the network. The
-      # manager path runs through agentd over a Unix socket. So syscheckd
-      # keeps bind() and loses IP traffic. The other daemons keep their
-      # traffic: agentd talks to the manager, and logcollector and modulesd
-      # run reader commands and wodles that a host configuration can point
-      # at the network.
+      # syscheckd creates and binds sockets for the rootcheck port probe,
+      # but the probe closes each socket right after the bind and never
+      # sends a packet (src/rootcheck/check_rc_ports.c), and nothing else
+      # in syscheckd or rootcheck uses the network. The manager path runs
+      # through agentd over a Unix socket. So syscheckd keeps bind() and
+      # loses IP traffic. The other daemons keep their traffic: agentd
+      # talks to the manager, and logcollector and modulesd run reader
+      # commands and wodles that a host configuration can point at the
+      # network.
       // optionalAttrs (d == "wazuh-syscheckd") {
         IPAddressDeny = "any";
       }
@@ -1066,11 +1068,6 @@ in
             Type = "oneshot";
             User = wazuhUser;
             Group = wazuhGroup;
-            # Same grounds as the daemon units. agent-auth writes
-            # etc/client.keys and the enrollment marker under var, both
-            # inside the writable state directories, and it connects out
-            # without binding.
-            SocketBindDeny = "any";
             ExecStart =
               "${pkg}/bin/agent-auth -m ${host} -p ${toString cfg.registration.port}"
               + optionalString (certFlags != "") " ${certFlags}";

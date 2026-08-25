@@ -366,14 +366,17 @@ pkgs.testers.runNixOSTest {
             f"nsenter -t {pid} -m -r -w -- /var/ossec/bin/wazuh-control info -t"
         )
 
-    with subtest("syscheckd keeps bind and loses IP traffic"):
-        # The inverse pair of the SocketBindDeny exemption below. The
-        # rootcheck probe binds and closes without one packet
+    with subtest("syscheckd loses IP traffic and nothing else does"):
+        # The rootcheck probe binds and closes without one packet
         # (src/rootcheck/check_rc_ports.c:60-92), and the manager path runs
         # through agentd over a Unix socket, so syscheckd works with no IP
         # traffic at all. The other daemons keep their traffic: agentd
         # talks to the manager, and a host configuration can point reader
-        # commands and wodles at the network.
+        # commands and wodles at the network. No unit carries
+        # SocketBindDeny: OS_Connect binds every client socket to an
+        # ephemeral port before it connects (src/os_net/os_net.c), so a
+        # bind deny cuts the agent off from its manager. The
+        # deliberately-absent note in the module holds the full story.
         deny = agent.succeed(
             "systemctl show -p IPAddressDeny --value wazuh-syscheckd.service"
         ).strip()
@@ -384,21 +387,13 @@ pkgs.testers.runNixOSTest {
             ).strip()
             assert deny == "", f"{daemon}: IPAddressDeny is {deny!r}"
 
-    with subtest("no daemon can bind an IP socket, except syscheckd"):
-        # Nothing in an agent listens, so a bind is a compromised daemon
-        # opening a listener. The exception: rootcheck runs inside
-        # wazuh-syscheckd and detects an open port by bind() failing on it
-        # (src/rootcheck/check_rc_ports.c:79), and the generated
-        # configuration ships rootcheck enabled. The deny there does not
-        # stop the daemon, it turns every port on the host into a finding.
+        # SocketBindDeny must stay absent everywhere; a regression here
+        # breaks enrollment with "(1208): Unable to connect".
         for daemon in daemons + ["wazuh-agent-auth"]:
             deny = agent.succeed(
                 f"systemctl show -p SocketBindDeny --value {daemon}.service"
             ).strip()
-            if daemon == "wazuh-syscheckd":
-                assert deny == "", f"syscheckd holds SocketBindDeny {deny!r}"
-            else:
-                assert "any" in deny, f"{daemon}: SocketBindDeny is {deny!r}"
+            assert deny == "", f"{daemon}: SocketBindDeny is {deny!r}"
 
     with subtest("the setup unit runs without a network"):
         got = agent.succeed(
@@ -625,10 +620,6 @@ pkgs.testers.runNixOSTest {
         assert (
             "/var/ossec/active-response" in rwp
         ), f"execd: active-response is not writable, the response locks break: {rwp!r}"
-        deny = responder.succeed(
-            "systemctl show -p SocketBindDeny --value wazuh-execd.service"
-        ).strip()
-        assert "any" in deny, f"execd: SocketBindDeny is {deny!r}"
 
         # The one exec carve-out in the module: the response programs live
         # in a writable directory, so execd alone executes out of one.

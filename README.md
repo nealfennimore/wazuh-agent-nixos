@@ -517,12 +517,6 @@ directory inodes, and the setup unit uses `ProtectSystem = "full"` with no
 `/var/ossec` bind at all, so nothing it mounts can leak into a daemon
 namespace through peer-group propagation.
 
-`SocketBindDeny = "any"` is set on every unit except `wazuh-syscheckd`.
-Nothing in an agent listens, so a bind is a compromised daemon that opens a
-listener. rootcheck runs inside `wazuh-syscheckd` and detects an open port
-when `bind()` fails on it, so the deny there reports every port on the host
-as a finding.
-
 The setup unit runs with `PrivateNetwork`. It copies files and reads a
 credential that PID 1 already resolved, so it has no reason to see a network.
 
@@ -533,12 +527,19 @@ their library mappings. The one exception is `wazuh-execd`, whose `ExecPaths`
 carve-out keeps `active-response/bin` executable. That directory is both
 writable and executable, and it is the residual gap named above.
 
-`wazuh-syscheckd` carries `IPAddressDeny = "any"`, the inverse of its
-`SocketBindDeny` exemption. The rootcheck probe binds and closes without one
-packet, and the manager path runs through `wazuh-agentd` over a Unix socket,
-so syscheckd keeps `bind()` and loses IP traffic. The other daemons keep
-their traffic: a host configuration can point reader commands and wodles at
-the network, and a deny there fails silently.
+`wazuh-syscheckd` carries `IPAddressDeny = "any"`. The rootcheck port probe
+binds and closes without one packet, and the manager path runs through
+`wazuh-agentd` over a Unix socket, so syscheckd works with no IP traffic at
+all. The other daemons keep their traffic: a host configuration can point
+reader commands and wodles at the network, and a deny there fails silently.
+
+`SocketBindDeny` is left out on every unit, on purpose. Wazuh binds every
+client socket to an ephemeral port before it connects (`OS_Connect` in
+`src/os_net/os_net.c`), so a bind deny cuts the agent off from its manager:
+`checks.enrollment` fails with `(1208): Unable to connect to enrollment
+service`. An allow rule for the port-0 bind is no fix, because a compromised
+daemon can bind port 0 and listen on the ephemeral port it gets, which is
+the exact thing the deny was for.
 
 Four other options are left out on purpose. `ProtectProc`, `ProcSubset`,
 `PrivateUsers` and `PrivatePIDs` each hide or remap other processes. rootcheck
