@@ -490,6 +490,25 @@ is-active` cannot see that. The check asserts that syscollector, SCA,
 rootcheck and file integrity monitoring each reach their own end line, and
 that no daemon died of a blocked syscall.
 
+The package trees under `/var/ossec` are read-only inside every daemon unit:
+`bin`, `lib`, `ruleset`, `wodles` and `agentless`. The setup unit owns those
+copies as the `wazuh` user, so without the mounts every daemon can rewrite
+code that later runs. The path that matters is `wazuh-execd`: the active
+response binaries load their libraries from `/var/ossec/lib` through their
+`$ORIGIN/../../lib` rpath, and `restart-wazuh` execs `bin/wazuh-control`.
+`active-response` stays writable, because `firewall-drop` and `host-deny`
+create their lock directories inside `active-response/bin`. That is the
+residual gap, and closing it needs root-owned package trees.
+
+`SocketBindDeny = "any"` is set on every unit except `wazuh-syscheckd`.
+Nothing in an agent listens, so a bind is a compromised daemon that opens a
+listener. rootcheck runs inside `wazuh-syscheckd` and detects an open port
+when `bind()` fails on it, so the deny there reports every port on the host
+as a finding.
+
+The setup unit runs with `PrivateNetwork`. It copies files and reads a
+credential that PID 1 already resolved, so it has no reason to see a network.
+
 Four other options are left out on purpose. `ProtectProc`, `ProcSubset`,
 `PrivateUsers` and `PrivatePIDs` each hide or remap other processes. rootcheck
 finds a hidden process by comparison of `kill(pid, 0)` and `getsid(pid)`

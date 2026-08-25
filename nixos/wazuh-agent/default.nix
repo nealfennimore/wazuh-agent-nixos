@@ -237,6 +237,41 @@ let
   # PrivateDevices are no longer in this list. They are applied above, and the
   # note there says what tests them.
 
+  # The package trees the daemons execute from or load libraries out of,
+  # made read-only inside every daemon unit.
+  #
+  # setup-pre-wazuh installs these owned by the wazuh user, and
+  # ReadWritePaths above makes the whole state directory writable, so
+  # without this every daemon can rewrite code that later runs. The unit
+  # that makes this matter is wazuh-execd. The active response binaries
+  # carry an rpath of $ORIGIN/../../lib (src/Makefile:189), so the copies
+  # under active-response/bin load their libraries from /var/ossec/lib, and
+  # the restart-wazuh response execs bin/wazuh-control. Both paths are
+  # read-only now, so a compromise of the wazuh user inside any daemon
+  # cannot feed code to the one unit that can hold a capability or root.
+  #
+  # active-response is not in this list, and that is the residual hole.
+  # firewall-drop and host-deny create their lock directories inside
+  # active-response/bin (LOCK_PATH in
+  # src/active-response/firewalls/default-firewall-drop.c), so a read-only
+  # mount there breaks both responses. Closing it needs root-owned package
+  # trees, which means a root setup unit, and that trade is not taken here.
+  #
+  # A WPK upgrade pushed by the manager rewrites bin, so it now fails
+  # against the read-only mount instead of replacing half a tree. On NixOS
+  # that is correct either way: the store owns the binaries, and
+  # setup-pre-wazuh rewrites the copies on every activation.
+  #
+  # The leading dash tolerates absence. ruleset is optional in the package,
+  # and a missing path must not fail the mount namespace.
+  readOnlyPackageDirs = map (dir: "-${stateDir}/${dir}") [
+    "bin"
+    "lib"
+    "ruleset"
+    "wodles"
+    "agentless"
+  ];
+
   # What each active response needs, granted per response rather than as one
   # block. Only wazuh-execd runs them, so nothing here reaches another unit.
   #
@@ -469,6 +504,18 @@ let
 
     serviceConfig =
       hardening
+      // {
+        ReadOnlyPaths = readOnlyPackageDirs;
+      }
+      # No agent daemon binds an IP socket, so a bind is a compromised
+      # daemon opening a listener. One exception: rootcheck runs inside
+      # wazuh-syscheckd and detects an open port by bind() failing on it
+      # (src/rootcheck/check_rc_ports.c:79). Denying binds there does not
+      # stop the daemon, it turns every port on the host into a finding,
+      # and the generated configuration ships rootcheck enabled.
+      // optionalAttrs (d != "wazuh-syscheckd") {
+        SocketBindDeny = "any";
+      }
       // optionalAttrs (d == "wazuh-execd") execdHardening
       // {
         Type = "exec";
@@ -972,6 +1019,11 @@ in
             Type = "oneshot";
             User = wazuhUser;
             Group = wazuhGroup;
+            # Same grounds as the daemon units. agent-auth writes
+            # etc/client.keys, which is outside the package trees, and it
+            # connects out without binding.
+            ReadOnlyPaths = readOnlyPackageDirs;
+            SocketBindDeny = "any";
             ExecStart =
               "${pkg}/bin/agent-auth -m ${host} -p ${toString cfg.registration.port}"
               + optionalString (certFlags != "") " ${certFlags}";
@@ -995,6 +1047,12 @@ in
           Type = "oneshot";
           User = wazuhUser;
           Group = wazuhGroup;
+          # This unit copies files and reads a credential that PID 1 already
+          # resolved. It has no reason to see a network at all.
+          #
+          # readOnlyPackageDirs is deliberately absent here: this is the
+          # unit that refreshes those trees.
+          PrivateNetwork = true;
           LoadCredential = optional (cfg.agentAuthPasswordFile != null) (
             "${enrollmentPasswordCredential}:${toString cfg.agentAuthPasswordFile}"
           );

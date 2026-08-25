@@ -249,6 +249,51 @@ pkgs.testers.runNixOSTest {
         for daemon in unmanaged:
             agent.succeed(f"systemctl is-active {daemon}.service")
 
+    with subtest("the package code is read-only inside the units"):
+        for daemon in daemons:
+            ro = agent.succeed(
+                f"systemctl show -p ReadOnlyPaths --value {daemon}.service"
+            )
+            for tree in ["bin", "lib", "ruleset", "wodles", "agentless"]:
+                assert (
+                    f"/var/ossec/{tree}" in ro
+                ), f"{daemon}: /var/ossec/{tree} is not read-only: {ro!r}"
+
+        # Enforcement, not only configuration. Enter the mount namespace of
+        # a running daemon as root: the package trees must refuse the write
+        # and the state directories must still take one. A read-only bind
+        # mount refuses root too, so a pass here proves the mount rather
+        # than a permission bit.
+        pid = agent.succeed(
+            "systemctl show -p MainPID --value wazuh-logcollector.service"
+        ).strip()
+        agent.fail(f"nsenter -t {pid} -m -- touch /var/ossec/bin/probe")
+        agent.fail("test -e /var/ossec/bin/probe")
+        agent.succeed(f"nsenter -t {pid} -m -- touch /var/ossec/logs/probe")
+        agent.succeed(f"nsenter -t {pid} -m -- rm /var/ossec/logs/probe")
+
+    with subtest("no daemon can bind an IP socket, except syscheckd"):
+        # Nothing in an agent listens, so a bind is a compromised daemon
+        # opening a listener. The exception: rootcheck runs inside
+        # wazuh-syscheckd and detects an open port by bind() failing on it
+        # (src/rootcheck/check_rc_ports.c:79), and the generated
+        # configuration ships rootcheck enabled. The deny there does not
+        # stop the daemon, it turns every port on the host into a finding.
+        for daemon in daemons + ["wazuh-agent-auth"]:
+            deny = agent.succeed(
+                f"systemctl show -p SocketBindDeny --value {daemon}.service"
+            ).strip()
+            if daemon == "wazuh-syscheckd":
+                assert deny == "", f"syscheckd holds SocketBindDeny {deny!r}"
+            else:
+                assert "any" in deny, f"{daemon}: SocketBindDeny is {deny!r}"
+
+    with subtest("the setup unit runs without a network"):
+        got = agent.succeed(
+            "systemctl show -p PrivateNetwork --value setup-pre-wazuh.service"
+        ).strip()
+        assert got == "yes", f"setup-pre-wazuh PrivateNetwork is {got!r}"
+
     with subtest("configuration assessment is configured and has policies"):
         # The shipped ossec-agent.conf has no sca block. install.sh writes one
         # into a different file, so this module never ran before.
@@ -453,6 +498,26 @@ pkgs.testers.runNixOSTest {
         assert "/var/ossec" in rwp, f"execd lost its state directory: {rwp}"
         responder.succeed("test $(stat -c %U /etc/hosts.deny) = wazuh")
         responder.succeed("runuser -u wazuh -- test -w /etc/hosts.deny")
+
+        # execd is the unit that runs manager-supplied commands, so the
+        # read-only code trees matter most here. The active response
+        # binaries load their libraries from /var/ossec/lib through their
+        # $ORIGIN/../../lib rpath, and that tree must not be writable to
+        # the user the other daemons run as. active-response itself must
+        # stay writable: firewall-drop and host-deny keep their lock
+        # directories inside active-response/bin.
+        ro = responder.succeed(
+            "systemctl show -p ReadOnlyPaths --value wazuh-execd.service"
+        )
+        for tree in ["bin", "lib", "wodles"]:
+            assert f"/var/ossec/{tree}" in ro, f"execd: {tree} is writable: {ro!r}"
+        assert (
+            "/var/ossec/active-response" not in ro
+        ), f"execd: active-response is read-only, the response locks break: {ro!r}"
+        deny = responder.succeed(
+            "systemctl show -p SocketBindDeny --value wazuh-execd.service"
+        ).strip()
+        assert "any" in deny, f"execd: SocketBindDeny is {deny!r}"
 
         # Not enabled on the default node, so nothing there was widened.
         agent.fail("test -e /etc/hosts.deny")
