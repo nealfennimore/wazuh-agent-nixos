@@ -66,10 +66,18 @@ let
       }/tests/integration";
 
   # Arguments that one suite needs and the others must not see. Each entry
-  # carries the reason it exists. Two classes appear so far: tests that need
-  # audit infrastructure NixOS cannot provide, and single cases that lose a
-  # timing race inside a VM.
+  # carries the reason it exists. Three classes appear so far: tests that need
+  # audit infrastructure NixOS cannot provide, single cases that lose a
+  # timing race inside a VM, and tests of a response this flake removes on
+  # purpose.
   suiteFlags = {
+    # The whole file drives the restart-wazuh response and asserts on the
+    # execd shutdown log it causes. This flake removes restart-wazuh and
+    # restart.sh from the package output, because they start daemons outside
+    # systemd (see noExecStateDirsFor in nixos/wazuh-agent/default.nix). The
+    # response is absent by design, so the test can only fail.
+    test_execd = "--ignore=test_execd/test_run_active_response/test_restart_wazuh.py";
+
     test_fim = builtins.concatStringsSep " " [
       # whodata mode needs the audit daemon with the audisp-af_unix plugin,
       # and syscheck_audit.c writes a plugin file that names
@@ -238,6 +246,27 @@ pkgs.testers.runNixOSTest {
             " wazuh-agentd.service wazuh-logcollector.service"
             " wazuh-syscheckd.service wazuh-modulesd.service"
             " wazuh-execd.service"
+        )
+
+    with subtest("hand the suite-owned files from the store to the suite"):
+        # The module links etc/ossec.conf and ruleset into the read-only
+        # store. The suite opens ossec.conf "r+" to rewrite it between
+        # tests, and test_sca swaps policy files inside ruleset/sca, so
+        # both must be mutable here. Replace the links with real copies.
+        # The daemons run as root under the suite and read the copies the
+        # same way. checks.agent is what proves the immutable layout.
+        agent.succeed(
+            "cp -L /var/ossec/etc/ossec.conf /var/ossec/etc/ossec.conf.rw"
+            " && mv /var/ossec/etc/ossec.conf.rw /var/ossec/etc/ossec.conf"
+            " && chmod 640 /var/ossec/etc/ossec.conf"
+        )
+        # The module treats ruleset as optional, hence the guard.
+        agent.succeed(
+            "if [ -L /var/ossec/ruleset ]; then"
+            " ruleset=$(readlink -f /var/ossec/ruleset)"
+            " && rm /var/ossec/ruleset"
+            ' && cp -r --no-preserve=mode,ownership "$ruleset" /var/ossec/ruleset;'
+            " fi"
         )
 
     with subtest("wazuh-control answers from any directory"):
