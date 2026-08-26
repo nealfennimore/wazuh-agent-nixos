@@ -162,8 +162,8 @@ fault.
 
 Policies come from the package at `ruleset/sca`. Upstream installs the set
 that matches the distribution and falls back to
-`sca_distro_independent_linux.yml`, which is what NixOS gets. `preStart`
-copies that directory into `/var/ossec`.
+`sca_distro_independent_linux.yml`, which is what NixOS gets. The module links
+that package directory into `/var/ossec`.
 
 ### The agent event buffer
 
@@ -518,14 +518,17 @@ is-active` cannot see that. The check asserts that syscollector, SCA,
 rootcheck and file integrity monitoring each reach their own end line, and
 that no daemon died of a blocked syscall.
 
-Inside every daemon unit, four state directories are writable: `logs`,
-`queue`, `var` and `tmp`. Everything else under `/var/ossec`, including the
-package trees `bin`, `lib`, `ruleset`, `wodles` and `agentless`, stays
-read-only through the strict root. The setup unit owns those copies as the
-`wazuh` user, so without this every daemon can rewrite code that later runs.
-The path that matters is `wazuh-execd`: the active response binaries load
-their libraries from `/var/ossec/lib` through their `$ORIGIN/../../lib`
-rpath, and `restart-wazuh` execs `bin/wazuh-control`.
+`/var/ossec` is a split Nix/state tree. Package-owned `bin`, `lib`, `ruleset`,
+`wodles` and `agentless` are links to the selected package in `/nix/store`,
+and generated `etc/ossec.conf` is a store link too. An upgrade changes link
+targets instead of copying package data into mutable state. `logs`, `queue`,
+`var` and `tmp` remain real directories owned by `wazuh`.
+
+Four optional wodles are rejected when supplied through `config` or
+`extraConfig`: `aws-s3`, `azure-logs`, `gcloud-pubsub` and
+`docker-listener`. Their upstream implementations keep mutable databases
+beside their code, which is incompatible with a store-linked `wodles` tree.
+Move that state under `var` before enabling them.
 
 Two more directories are writable per unit rather than shared, because both
 decide what the agent runs.
@@ -538,53 +541,36 @@ to a binary. Only `wazuh-agentd` and `wazuh-agent-auth` write it:
 manager-triggered re-enrollment, plus `etc/shared/merged.mg` when the manager
 pushes shared configuration. The other daemons read `etc` and lose the write.
 
-`active-response` holds the response programs, which `wazuh-execd` runs with
-`CAP_NET_ADMIN` or, under `disable-account`, as root. Only `wazuh-execd`
-writes it, for the lock directories that `firewall-drop` and `host-deny`
-create inside `active-response/bin`. That directory is both writable and
-executable inside that one unit, which is the residual gap. Closing it needs
-root-owned package trees. Until then, the split means a compromise of one
-daemon does not reach what another daemon runs.
+`active-response/bin` is a real root-owned sticky directory because three
+responses create mutex directories beside themselves. Each program in it is
+a root-owned link to the package output. The `wazuh` group can create and
+remove its runtime locks but cannot replace those links. Only `wazuh-execd`
+gets a writable mount for the directory.
 
-`wazuh-execd` also denies exec on `bin`. Read-only is not enough there: the
-manager selects a response through `ar.conf`, and `restart-wazuh` execs
-`bin/wazuh-control`, which starts daemons outside the supervision systemd
-already provides. `lib` stays executable, and `bin` is on no library path.
+Upstream creates those mutex directories as mode `0070`, leaving the owner
+unable to write the PID file inside. The package patches that to owner mode
+`0700`, so non-root active responses can acquire their locks.
 
-The direction of that list is deliberate. An earlier version kept `/var/ossec`
-writable and stacked `ReadOnlyPaths` mounts over the package trees.
-`checks.agent` caught those mounts vanishing, and the mechanism is the
-kernel: deleting a mountpoint directory detaches the mounts every namespace
-holds on it, and the setup unit deleted exactly those directories on every
-activation during its refresh. A lost read-only mount fails open and says
-nothing. A lost writable bind fails closed: the daemon cannot write its
-state, and says so. The read-only guarantee therefore rests on the root
-remount, the setup refresh replaces directory contents and keeps the
-directory inodes, and the setup unit uses `ProtectSystem = "full"` with no
-`/var/ossec` bind at all, so nothing it mounts can leak into a daemon
-namespace through peer-group propagation.
+`restart-wazuh` and `restart.sh` are removed from the package output. They
+start daemons outside systemd, and removing them avoids a replaceable child
+`NoExecPaths` mount on the `bin` store link. `lib` stays executable for the
+response binaries' rpath.
 
-The refresh keeps `active-response/bin` for the same reason it keeps the
-top-level directories. That path is the mount point of `wazuh-execd`'s
-`ExecPaths` carve-out, so deleting it detaches the carve-out from a running
-`wazuh-execd` and every response then fails `execve` against the `noexec`
-mount over the parent. Nothing reports that: the unit stays active, the
-target stays reached, and the error lands in `logs/active-responses.log`. The
-refresh still clears the directory's contents, so a lock directory left
-behind by a killed response does not survive, because the responses use
-`mkdir` on that directory as their mutex. `checks.agent` restarts the setup
-unit against a running `wazuh-execd` and asserts the mount and an `execve`
-on both sides of it.
+The layout unit runs as root, owns the fixed structure, migrates old copied
+trees to links, and preserves host state. Sticky mixed directories prevent
+the daemon UID from replacing root-owned links while still allowing
+`client.keys`, manager-pushed shared data and response mutexes to change.
+The response directory remains `noexec`; store-linked programs resolve onto
+the executable store mount, while a regular payload staged beside them does
+not execute.
 
-The setup unit runs with `PrivateNetwork`. It copies files and reads a
-credential that PID 1 already resolved, so it has no reason to see a network.
+The setup unit runs with `PrivateNetwork`. It manages links, initializes state
+and reads a credential that PID 1 already resolved, so it has no reason to see
+a network.
 
 Each unit's writable directories all carry `noexec`, so writable and
-executable never overlap: a payload staged in `queue`, `logs` or `tmp` cannot
-run, and the read-only trees stay executable, which the response binaries
-need for their library mappings. The one exception is `wazuh-execd`, whose
-`ExecPaths` carve-out keeps `active-response/bin` executable. That directory
-is both writable and executable, and it is the residual gap named above.
+executable never overlap: a payload staged in `queue`, `logs`, `tmp` or
+`active-response` cannot run. Store links still execute from the store mount.
 
 `wazuh-syscheckd` carries `IPAddressDeny = "any"`. The rootcheck port probe
 binds and closes without one packet, and the manager path runs through

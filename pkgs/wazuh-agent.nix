@@ -141,6 +141,7 @@ stdenv.mkDerivation {
     ./patches/02-build-openssl-with-perl.patch
     ./patches/03-use-wazuh-home.patch
     ./patches/04-systemd-owns-privilege-drop.patch
+    ./patches/05-fix-active-response-lock-mode.patch
   ];
 
   # GCC 13 and later reject the incompatible pointer types in the vendored
@@ -348,6 +349,14 @@ stdenv.mkDerivation {
       --replace-fail "cd ''${LOCAL}" "#"
 
     chmod u+x $out/bin/* $out/active-response/bin/*
+
+    # These responses start daemons through wazuh-control, outside the
+    # supervision systemd already provides. Removing them is stronger than a
+    # runtime noexec mount and lets /var/ossec/bin be a direct store link.
+    rm -f $out/active-response/bin/restart-wazuh \
+      $out/active-response/bin/restart.sh
+    test ! -e $out/active-response/bin/restart-wazuh
+    test ! -e $out/active-response/bin/restart.sh
 
     # The NixOS module reads this to build ossec.conf. Keeping a copy in the
     # output removes the evaluation-time fetch the module used to do.

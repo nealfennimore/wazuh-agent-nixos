@@ -1,0 +1,10 @@
+diff --git a/src/active-response/active_responses.c b/src/active-response/active_responses.c
+index 889ca05..a98b7e2 100644
+--- a/src/active-response/active_responses.c
++++ b/src/active-response/active_responses.c
+@@ -609 +609 @@ int lock(const char *lock_path, const char *lock_pid_path, const char *log_path,
+-        if (mkdir(lock_path, S_IRWXG) == 0) {
++        if (mkdir(lock_path, S_IRWXU) == 0) {
+@@ -712 +712 @@ int lock(const char *lock_path, const char *lock_pid_path, const char *log_path,
+-                if (mkdir(lock_path, S_IRWXG) == 0) {
++                if (mkdir(lock_path, S_IRWXU) == 0) {
