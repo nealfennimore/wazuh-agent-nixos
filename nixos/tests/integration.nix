@@ -144,33 +144,32 @@ let
     ${pkgs.python3}/bin/python3 ${disableInstallAudit} $out
   '';
 
+  # The real wazuh-control computes DIR as the parent of the current working
+  # directory, because the package build removed its `cd $LOCAL` line. The
+  # framework calls it from the pytest working directory, which is wrong.
+  # This wrapper pins the directory and exports WAZUH_HOME for the daemons
+  # that wazuh-control forks. Keep it in the store: /var/ossec/bin is now an
+  # immutable store link and test instrumentation must not rewrite it.
+  controlWrapper = pkgs.writeScript "wazuh-control-wrapper" ''
+    #!/bin/sh
+    export WAZUH_HOME=/var/ossec
+    cd /var/ossec/bin
+    exec /bin/sh ./wazuh-control "$@"
+  '';
+
   # control_service() runs `service wazuh-agent <action>` and reads the exit
-  # code. Map that onto wazuh-control, which is what service(8) reaches on
-  # the distributions upstream tests on. A few fixtures use service(8) for
-  # other units, so anything else goes to systemctl with the argument order
-  # swapped.
+  # code. Map that onto the wrapper above, which in turn reaches the immutable
+  # wazuh-control script. A few fixtures use service(8) for other units, so
+  # anything else goes to systemctl with the argument order swapped.
   serviceShim = pkgs.writeShellScriptBin "service" ''
     case "$1" in
       wazuh-agent | wazuh-manager)
-        exec /var/ossec/bin/wazuh-control "$2"
+        exec ${controlWrapper} "$2"
         ;;
       *)
         exec systemctl "$2" "$1"
         ;;
     esac
-  '';
-
-  # The real wazuh-control computes DIR as the parent of the current working
-  # directory, because the package build removed its `cd $LOCAL` line. The
-  # framework calls it from the pytest working directory, which is wrong.
-  # This wrapper pins the directory and exports WAZUH_HOME for the daemons
-  # that wazuh-control forks. The test script moves the real script to
-  # .wazuh-control-wrapped and puts this in its place.
-  controlWrapper = pkgs.writeScript "wazuh-control-wrapper" ''
-    #!/bin/sh
-    export WAZUH_HOME=/var/ossec
-    cd /var/ossec/bin
-    exec /bin/sh ./.wazuh-control-wrapped "$@"
   '';
 in
 pkgs.testers.runNixOSTest {
@@ -242,12 +241,7 @@ pkgs.testers.runNixOSTest {
         )
 
     with subtest("wazuh-control answers from any directory"):
-        agent.succeed(
-            "mv /var/ossec/bin/wazuh-control /var/ossec/bin/.wazuh-control-wrapped"
-        )
-        agent.succeed("cp ${controlWrapper} /var/ossec/bin/wazuh-control")
-        agent.succeed("chmod 750 /var/ossec/bin/wazuh-control")
-        agent_type = agent.succeed("cd / && /var/ossec/bin/wazuh-control info -t").strip()
+        agent_type = agent.succeed("cd / && ${controlWrapper} info -t").strip()
         assert agent_type == "agent", f"wazuh-control info -t said {agent_type!r}"
 
     with subtest("the service shim drives the whole agent"):
