@@ -171,14 +171,59 @@ let
       </sca>
     </ossec_config>
   '';
+
+  # ossec-agent.conf ships no <labels> block either, so it appends like sca.
+  # Only wazuh-agentd reads it (src/client-agent/config.c:68), and a label
+  # error there is fatal before enrollment starts.
+  #
+  # Keys and values pass through escapeXML: an ampersand or an angle bracket
+  # in a tag value would otherwise make OS_ReadXML reject the whole file, in
+  # every daemon at once. Keys that start with "_" are rejected at evaluation
+  # in default.nix, because labels-config.c:52 only warns and skips them.
+  #
+  # The section is written only when labels exist. An empty <labels> block
+  # would read as configured.
+  labelLine =
+    key: label:
+    ''<label key="${lib.escapeXML key}"''
+    + lib.optionalString label.hidden '' hidden="yes"''
+    + ''>${lib.escapeXML label.value}</label>'';
+
+  labelsSection = lib.optionalString (cfg.labels != { }) ''
+    <ossec_config>
+      <labels>
+        ${lib.concatStringsSep "\n    " (lib.mapAttrsToList labelLine cfg.labels)}
+      </labels>
+    </ossec_config>
+  '';
+
+  # The <logging> section, also absent from ossec-agent.conf. Each daemon
+  # reads it on its own, through os_logging_config in shared/debug_op.c: an
+  # absent or empty log_format falls back to plain silently, and an unknown
+  # value is fatal. The block is always written, so the file states the
+  # choice instead of leaning on the fallback. An assertion in default.nix
+  # keeps at least one format on, so logFormat is never empty here.
+  logFormat = lib.concatStringsSep "," (
+    lib.optional cfg.logging.plain "plain" ++ lib.optional cfg.logging.json "json"
+  );
+
+  loggingSection = ''
+    <ossec_config>
+      <logging>
+        <log_format>${logFormat}</log_format>
+      </logging>
+    </ossec_config>
+  '';
 in
 pkgs.runCommand "ossec.conf"
   {
     inherit (cfg) extraConfig;
-    inherit scaSection;
+    inherit scaSection labelsSection loggingSection;
     passAsFile = [
       "extraConfig"
       "scaSection"
+      "labelsSection"
+      "loggingSection"
     ];
     template = "${cfg.package}/share/wazuh-agent/ossec-agent.conf";
   }
@@ -236,7 +281,22 @@ pkgs.runCommand "ossec.conf"
       exit 1
     fi
 
-    # Wazuh accepts more than one ossec_config root tag, so both of these
+    # Same rule for the other appended sections. For logging the failure
+    # mode is sharper: os_logging_config reads the first log_format it
+    # finds, so a template copy would silently win over the options.
+    if grep -q '<labels>' ossec.conf; then
+      echo "generate-agent-config: the template now ships its own <labels> block." >&2
+      echo "Merge the labels options into it rather than append a second one." >&2
+      exit 1
+    fi
+    if grep -q '<logging>' ossec.conf; then
+      echo "generate-agent-config: the template now ships its own <logging> block." >&2
+      echo "Substitute it rather than append a second one; the first wins." >&2
+      exit 1
+    fi
+
+    # Wazuh accepts more than one ossec_config root tag, so all of these
     # append as their own root.
-    cat ossec.conf "$scaSectionPath" "$extraConfigPath" > $out
+    cat ossec.conf "$scaSectionPath" "$labelsSectionPath" "$loggingSectionPath" \
+      "$extraConfigPath" > $out
   ''

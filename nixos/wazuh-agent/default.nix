@@ -967,6 +967,83 @@ in
       };
     };
 
+    labels = mkOption {
+      description = ''
+        Labels that the agent reports with its events, as key to value.
+        The manager adds them to every alert from this host, so rules,
+        searches and dashboards can select agents by environment, role,
+        or any other tag.
+
+        A plain string is a visible label. The submodule form adds
+        hidden: the manager still receives a hidden label, and omits it
+        from alert output unless it is configured to show them.
+
+        Keys must not start with "_". That prefix is reserved for
+        internal use, and the agent skips such a label at runtime with
+        only a warning (src/config/labels-config.c:52). An assertion
+        turns that silent skip into an evaluation error.
+
+        Keys and values are XML-escaped, so characters like "&" and "<"
+        are safe here.
+      '';
+      default = { };
+      example = literalExpression ''
+        {
+          environment = "production";
+          rack = { value = "row 4"; hidden = true; };
+        }
+      '';
+      type = types.attrsOf (
+        types.coercedTo types.str (value: { inherit value; }) (
+          types.submodule {
+            options = {
+              value = mkOption {
+                type = types.str;
+                description = "The label value.";
+              };
+              hidden = mkOption {
+                type = types.bool;
+                default = false;
+                description = ''
+                  Whether the manager omits this label from alert output.
+                  The label still reaches the manager either way.
+                '';
+              };
+            };
+          }
+        )
+      );
+    };
+
+    logging = mkOption {
+      description = ''
+        The format of the agent's own log. Every daemon writes
+        logs/ossec.log when plain is on, and logs/ossec.json when json
+        is on. Both can be on at once.
+
+        At least one must be on. With both off the daemons fall back to
+        plain silently (shared/debug_op.c), so an assertion rejects that
+        instead of writing a configuration that does not mean what it
+        says.
+      '';
+      default = { };
+      type = types.submodule {
+        options = {
+          plain = mkOption {
+            type = types.bool;
+            default = true;
+            description = "Whether to write the plain text log, logs/ossec.log.";
+          };
+
+          json = mkOption {
+            type = types.bool;
+            default = false;
+            description = "Whether to write the JSON log, logs/ossec.json.";
+          };
+        };
+      };
+    };
+
     activeResponse = mkOption {
       description = ''
         Active response, which lets the manager tell this agent to act on a
@@ -1099,6 +1176,23 @@ in
           services.wazuh-agent.registration.certFile and
           services.wazuh-agent.registration.keyFile must be set together. A
           client certificate without its key cannot complete a handshake.
+        '';
+      }
+      {
+        assertion = all (key: key != "" && !(hasPrefix "_" key)) (attrNames cfg.labels);
+        message = ''
+          services.wazuh-agent.labels holds an empty key or a key that
+          starts with "_". The "_" prefix is reserved for internal use, and
+          the agent skips such a label at runtime with only a warning
+          (src/config/labels-config.c). Rename the label.
+        '';
+      }
+      {
+        assertion = cfg.logging.plain || cfg.logging.json;
+        message = ''
+          services.wazuh-agent.logging turns off both plain and json. The
+          daemons fall back to plain silently (shared/debug_op.c), so turn
+          at least one format on.
         '';
       }
       {

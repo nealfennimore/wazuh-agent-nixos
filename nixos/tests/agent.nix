@@ -96,6 +96,20 @@ pkgs.testers.runNixOSTest {
         # substitution rather than the template.
         buffer.queueSize = 20000;
         buffer.eventsPerSecond = 250;
+
+        # Non-default labels and log format, so the subtests prove the
+        # appended sections rather than the defaults. The ampersand is
+        # there on purpose: unescaped it would make OS_ReadXML reject the
+        # file in every daemon at once.
+        labels = {
+          environment = "production";
+          rack = {
+            value = "row 4";
+            hidden = true;
+          };
+          carrier = "AT&T";
+        };
+        logging.json = true;
       };
     };
 
@@ -978,6 +992,66 @@ pkgs.testers.runNixOSTest {
         disabler.succeed(
             f"grep -A1 '<client_buffer>' {conf} | grep -q '<disabled>yes</disabled>'"
         )
+
+    with subtest("the agent log format is configurable"):
+        # The template ships no <logging> block, so the appended one is
+        # the only one. That count matters: os_logging_config reads the
+        # first log_format in the file, so a second block would win
+        # silently over the options.
+        agent.succeed(f"test $(grep -c '<logging>' {conf}) -eq 1")
+        agent.succeed(f"grep -q '<log_format>plain</log_format>' {conf}")
+        notifier.succeed(f"grep -q '<log_format>plain,json</log_format>' {conf}")
+
+        # Every daemon parses the section on its own (shared/debug_op.c),
+        # and an unknown value is fatal, so a live daemon proves the parse.
+        # The JSON stream is a second file beside the plain one, written
+        # by the same _log_function call, so any daemon log line lands in
+        # both once json is on.
+        notifier.wait_for_file("/var/ossec/logs/ossec.json", timeout=120)
+        notifier.succeed("grep -q '\"timestamp\"' /var/ossec/logs/ossec.json")
+        notifier.succeed("test -s /var/ossec/logs/ossec.log")
+
+        # Plain-only means no JSON file at all. debug_op.c opens
+        # LOGJSONFILE only when the json flag is set, so an existing file
+        # here would mean the default node parsed a json format.
+        agent.succeed("test -s /var/ossec/logs/ossec.log")
+        agent.fail("test -e /var/ossec/logs/ossec.json")
+
+    with subtest("labels reach the generated configuration"):
+        # No labels configured, no section at all. An empty <labels>
+        # block would read as configured.
+        agent.fail(f"grep -q '<labels>' {conf}")
+
+        notifier.succeed(f"test $(grep -c '<labels>' {conf}) -eq 1")
+        notifier.succeed(
+            f"grep -q '<label key=\"environment\">production</label>' {conf}"
+        )
+        # hidden renders as an attribute, and only where it was asked for.
+        notifier.succeed(
+            f"grep -q '<label key=\"rack\" hidden=\"yes\">row 4</label>' {conf}"
+        )
+        notifier.fail(f"grep -q 'key=\"environment\" hidden' {conf}")
+        # The ampersand must arrive escaped. Unescaped it fails XML
+        # parsing in every daemon, not only the labels reader.
+        notifier.succeed(
+            f"grep -q '<label key=\"carrier\">AT&amp;T</label>' {conf}"
+        )
+        notifier.fail(f"grep -q '<label key=\"carrier\">AT&T</label>' {conf}")
+
+        # wazuh-agentd is the daemon that reads <labels>
+        # (src/client-agent/config.c:68), and ClientConf runs before
+        # enrollment (client-agent/main.c:203). A label error is fatal
+        # there, so an enrollment attempt proves the section parsed.
+        # Enrollment itself cannot succeed in a VM with no manager.
+        notifier.wait_until_succeeds(
+            "journalctl -u wazuh-agentd | grep -q 'Requesting a key from server'",
+            timeout=120,
+        )
+
+        # The daemons that do not need a manager must still be running
+        # with labels and json logging in the file.
+        for daemon in ["wazuh-logcollector", "wazuh-syscheckd", "wazuh-modulesd"]:
+            notifier.succeed(f"systemctl is-active {daemon}.service")
 
     with subtest("enrollment is unverified unless a CA is configured"):
         # Off by default, and the absence must be an absent block rather than

@@ -128,6 +128,9 @@ sudo systemctl restart wazuh.target
 | `buffer.enable` | `true` | Buffers events between the collectors and the manager link. |
 | `buffer.queueSize` | `5000` | How many events the queue holds. The range is 1 to 100000. |
 | `buffer.eventsPerSecond` | `500` | The send rate out of the queue. The range is 1 to 1000. |
+| `labels` | `{ }` | Labels that the manager adds to every alert from this host. |
+| `logging.plain` | `true` | Writes the agent's own log as text, to `logs/ossec.log`. |
+| `logging.json` | `false` | Writes the agent's own log as JSON, to `logs/ossec.json`. |
 | `activeResponse.enable` | `false` | Lets the agent act on a finding, not only report it. |
 | `activeResponse.capability.<name>.enable` | see below | Whether that response is provisioned. |
 | `extraConfig` | `""` | XML appended to the generated `ossec.conf`. |
@@ -140,6 +143,10 @@ sources created by sops-nix, agenix, or another secret manager are supported;
 systemd reads the source and delivers it to the setup service as a credential.
 
 `config` and `extraConfig` conflict. An assertion rejects both together.
+
+Not every upstream configuration section has an option here.
+[docs/implementation-status.md](docs/implementation-status.md) records which
+sections the module covers and which work remains.
 
 ### Configuration assessment
 
@@ -187,6 +194,38 @@ services.wazuh-agent.buffer = {
 
 Set `buffer.enable = false` to send every event directly. That removes the
 flood protection.
+
+### Labels
+
+Labels are key-value tags that the agent reports with its events. The
+manager adds them to every alert from this host, so rules, searches and
+dashboards can select agents by environment, role, or any other tag.
+
+```nix
+services.wazuh-agent.labels = {
+  environment = "production";
+  rack = { value = "row 4"; hidden = true; };
+};
+```
+
+A plain string is a visible label. The submodule form adds `hidden`: the
+manager still receives a hidden label, and omits it from alert output
+unless it is configured to show them. Keys and values are XML-escaped, so
+characters like `&` are safe. Keys must not start with `_`, which is
+reserved for internal use. An assertion rejects such a key, because the
+agent skips it at runtime with only a warning.
+
+### The agent's own log
+
+`logging.plain` and `logging.json` select the format of the log that the
+daemons write about themselves. Plain text goes to `logs/ossec.log` and
+JSON goes to `logs/ossec.json`. Both can be on at once. At least one must
+be on, and an assertion enforces that, because the daemons treat an empty
+format as plain and hide the mistake.
+
+This log also reaches journald, because the daemons run in the foreground
+under systemd. Turn on `logging.json` when a collector reads the file
+directly and wants structured records.
 
 ### Active response
 
