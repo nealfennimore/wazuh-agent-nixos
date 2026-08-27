@@ -983,8 +983,12 @@ in
         only a warning (src/config/labels-config.c:52). An assertion
         turns that silent skip into an evaluation error.
 
-        Keys and values are XML-escaped, so characters like "&" and "<"
-        are safe here.
+        Keys and values are written into ossec.conf verbatim. Wazuh's
+        parser does not decode XML entities, so a raw "&" is correct and
+        an "&amp;" reaches the manager as five literal characters.
+        Assertions reject the few characters the parser cannot carry:
+        `"`, `<`, and `>` in keys, and in values `<` or a trailing
+        backslash.
       '';
       default = { };
       example = literalExpression ''
@@ -1179,12 +1183,29 @@ in
         '';
       }
       {
-        assertion = all (key: key != "" && !(hasPrefix "_" key)) (attrNames cfg.labels);
+        assertion = all (
+          key: key != "" && !(hasPrefix "_" key) && !(any (c: hasInfix c key) [ "\"" "<" ">" ])
+        ) (attrNames cfg.labels);
         message = ''
-          services.wazuh-agent.labels holds an empty key or a key that
-          starts with "_". The "_" prefix is reserved for internal use, and
-          the agent skips such a label at runtime with only a warning
-          (src/config/labels-config.c). Rename the label.
+          services.wazuh-agent.labels holds a key that Wazuh cannot carry:
+          empty, starting with "_", or containing one of `"`, `<`, `>`.
+          The "_" prefix is reserved for internal use and the agent skips
+          such a label at runtime with only a warning
+          (src/config/labels-config.c). The three characters end or break
+          the key="..." attribute in Wazuh's parser, which does not decode
+          XML entities, so no escaping can represent them. Rename the key.
+        '';
+      }
+      {
+        assertion = all (label: !(hasInfix "<" label.value) && !(hasSuffix "\\" label.value)) (
+          attrValues cfg.labels
+        );
+        message = ''
+          services.wazuh-agent.labels holds a value that Wazuh cannot
+          carry: it contains "<" or ends with a backslash. Wazuh's parser
+          does not decode XML entities, so escaping cannot represent "<"
+          in a value, and a trailing backslash makes the parser swallow
+          the closing tag. Reword the value.
         '';
       }
       {

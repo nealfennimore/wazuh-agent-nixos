@@ -75,9 +75,10 @@ fill it. Policies load from `ruleset/sca` in the package.
 
 The `labels` option renders an appended `<labels>` block, one
 `<label key="...">` per entry, with an optional `hidden="yes"` attribute.
-Keys and values are XML-escaped. An assertion rejects empty keys and keys
-that start with `_`, because the agent skips those at runtime with only a
-warning. No block is written when the option is empty.
+Keys and values are written verbatim, because the Wazuh parser does not
+decode XML entities. Assertions reject empty keys, keys that start with
+`_`, and the characters the parser cannot carry. No block is written when
+the option is empty.
 
 ### logging
 

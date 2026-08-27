@@ -210,10 +210,15 @@ services.wazuh-agent.labels = {
 
 A plain string is a visible label. The submodule form adds `hidden`: the
 manager still receives a hidden label, and omits it from alert output
-unless it is configured to show them. Keys and values are XML-escaped, so
-characters like `&` are safe. Keys must not start with `_`, which is
-reserved for internal use. An assertion rejects such a key, because the
-agent skips it at runtime with only a warning.
+unless it is configured to show them.
+
+Keys and values go into `ossec.conf` verbatim. The Wazuh parser does not
+decode XML entities, so a raw `&` is correct and `&amp;` reaches the
+manager as five literal characters. Assertions reject what the parser
+cannot carry: `"`, `<`, or `>` in a key, and in a value `<` or a
+trailing backslash. Keys must not start with `_`, which is reserved for
+internal use. An assertion rejects such a key, because the agent skips
+it at runtime with only a warning.
 
 ### The agent's own log
 

@@ -99,8 +99,9 @@ pkgs.testers.runNixOSTest {
 
         # Non-default labels and log format, so the subtests prove the
         # appended sections rather than the defaults. The ampersand is
-        # there on purpose: unescaped it would make OS_ReadXML reject the
-        # file in every daemon at once.
+        # there on purpose: Wazuh's parser takes it raw and never decodes
+        # entities, so it must arrive unescaped or the manager would see
+        # the literal text "AT&amp;T".
         labels = {
           environment = "production";
           rack = {
@@ -1007,15 +1008,22 @@ pkgs.testers.runNixOSTest {
         # The JSON stream is a second file beside the plain one, written
         # by the same _log_function call, so any daemon log line lands in
         # both once json is on.
-        notifier.wait_for_file("/var/ossec/logs/ossec.json", timeout=120)
+        #
+        # Size, not existence. install.sh ships logs/ossec.json as an empty
+        # placeholder (src/init/inst-functions.sh:785) and the state copy
+        # carries it onto every node, so the file exists everywhere and
+        # only its content proves anything.
+        notifier.wait_until_succeeds(
+            "test -s /var/ossec/logs/ossec.json", timeout=120
+        )
         notifier.succeed("grep -q '\"timestamp\"' /var/ossec/logs/ossec.json")
         notifier.succeed("test -s /var/ossec/logs/ossec.log")
 
-        # Plain-only means no JSON file at all. debug_op.c opens
-        # LOGJSONFILE only when the json flag is set, so an existing file
-        # here would mean the default node parsed a json format.
+        # Plain-only leaves the placeholder empty. debug_op.c opens
+        # LOGJSONFILE only when the json flag is set, so one byte here
+        # would mean the default node parsed a json format.
         agent.succeed("test -s /var/ossec/logs/ossec.log")
-        agent.fail("test -e /var/ossec/logs/ossec.json")
+        agent.fail("test -s /var/ossec/logs/ossec.json")
 
     with subtest("labels reach the generated configuration"):
         # No labels configured, no section at all. An empty <labels>
@@ -1031,12 +1039,13 @@ pkgs.testers.runNixOSTest {
             f"grep -q '<label key=\"rack\" hidden=\"yes\">row 4</label>' {conf}"
         )
         notifier.fail(f"grep -q 'key=\"environment\" hidden' {conf}")
-        # The ampersand must arrive escaped. Unescaped it fails XML
-        # parsing in every daemon, not only the labels reader.
+        # The ampersand must arrive raw. Wazuh's parser stores content
+        # byte for byte and never decodes entities, so an escaped value
+        # here would reach the manager as the literal text "AT&amp;T".
         notifier.succeed(
-            f"grep -q '<label key=\"carrier\">AT&amp;T</label>' {conf}"
+            f"grep -q '<label key=\"carrier\">AT&T</label>' {conf}"
         )
-        notifier.fail(f"grep -q '<label key=\"carrier\">AT&T</label>' {conf}")
+        notifier.fail(f"grep -q '<label key=\"carrier\">AT&amp;T</label>' {conf}")
 
         # wazuh-agentd is the daemon that reads <labels>
         # (src/client-agent/config.c:68), and ClientConf runs before

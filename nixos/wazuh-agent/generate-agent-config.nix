@@ -176,18 +176,28 @@ let
   # Only wazuh-agentd reads it (src/client-agent/config.c:68), and a label
   # error there is fatal before enrollment starts.
   #
-  # Keys and values pass through escapeXML: an ampersand or an angle bracket
-  # in a tag value would otherwise make OS_ReadXML reject the whole file, in
-  # every daemon at once. Keys that start with "_" are rejected at evaluation
-  # in default.nix, because labels-config.c:52 only warns and skips them.
+  # Keys and values are written verbatim, not XML-escaped. Wazuh's own
+  # parser (src/os_xml) never decodes entities: it stores content byte for
+  # byte, so a raw "&" is both accepted and correct, while an escaped
+  # "&amp;" would reach the manager as the literal five characters. The few
+  # characters the parser genuinely cannot carry are rejected at evaluation
+  # in default.nix, as are keys starting with "_", which labels-config.c:52
+  # only warns about and skips.
   #
   # The section is written only when labels exist. An empty <labels> block
   # would read as configured.
+  #
+  # Double-quoted strings on purpose. An indented string strips leading
+  # whitespace even on a single line, so '' hidden="yes"'' loses the space
+  # that separates it from the key attribute. Wazuh's own XML parser then
+  # rejects the whole file with "Bad attribute closing", and every daemon
+  # exits at its first log call, because os_logging_config reads this file
+  # too and clears the parse error before it reports it.
   labelLine =
     key: label:
-    ''<label key="${lib.escapeXML key}"''
-    + lib.optionalString label.hidden '' hidden="yes"''
-    + ''>${lib.escapeXML label.value}</label>'';
+    "<label key=\"${key}\""
+    + lib.optionalString label.hidden " hidden=\"yes\""
+    + ">${label.value}</label>";
 
   labelsSection = lib.optionalString (cfg.labels != { }) ''
     <ossec_config>
@@ -299,4 +309,11 @@ pkgs.runCommand "ossec.conf"
     # append as their own root.
     cat ossec.conf "$scaSectionPath" "$labelsSectionPath" "$loggingSectionPath" \
       "$extraConfigPath" > $out
+
+    # No XML validator runs here on purpose. Wazuh's parser accepts input
+    # that a real XML parser rejects, a raw ampersand above all, and treats
+    # entities as literal bytes. A well-formedness check would therefore
+    # fail configurations the daemons accept, and pass escaping the daemons
+    # deliver corrupted. checks.agent boots the daemons against the file,
+    # and their parser is the only arbiter that counts.
   ''
