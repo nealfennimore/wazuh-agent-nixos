@@ -115,15 +115,22 @@ let
     <address>${cfg.manager.host}</address>
           <port>${toString cfg.manager.port}</port>'';
 
-  # Certificate verification for the enrollment that wazuh-agentd performs
-  # itself, which is a different code path from the agent-auth unit and the
-  # one that runs on every boot. Both need the same files, and configuring
-  # only agent-auth would leave the daemon enrolling unverified.
+  # Settings for the enrollment that wazuh-agentd performs itself, which is
+  # a different code path from the agent-auth unit and the one that runs on
+  # every boot. Both paths need the same identity and the same certificate
+  # files. Configuring only agent-auth would leave the daemon enrolling
+  # unverified, under the hostname and without groups.
   #
-  # Element names are config/client-config.c:391-393. The block goes inside
+  # Element names are config/client-config.c:387-393. The block goes inside
   # <client>, so anchor on the one </server> in the template.
-  enrollmentPaths =
+  enrollmentSettings =
     lib.optional (
+      cfg.registration.agentName != null
+    ) "<agent_name>${cfg.registration.agentName}</agent_name>"
+    ++ lib.optional (
+      cfg.registration.groups != [ ]
+    ) "<groups>${lib.concatStringsSep "," cfg.registration.groups}</groups>"
+    ++ lib.optional (
       cfg.registration.caFile != null
     ) "<server_ca_path>${cfg.registration.caFile}</server_ca_path>"
     ++ lib.optional (
@@ -138,13 +145,13 @@ let
   # Replacing </server> with itself when nothing is configured keeps the
   # --replace-fail below unconditional, so the pattern is still checked.
   serverCloseAndEnrollment =
-    if enrollmentPaths == [ ] then
+    if enrollmentSettings == [ ] then
       serverClose
     else
       ''
         </server>
             <enrollment>
-              ${lib.concatStringsSep "\n          " enrollmentPaths}
+              ${lib.concatStringsSep "\n          " enrollmentSettings}
             </enrollment>'';
 
   yesNo = b: if b then "yes" else "no";
@@ -272,9 +279,15 @@ pkgs.runCommand "ossec.conf"
     grep -A1 '<client_buffer>' ossec.conf \
       | grep -q '<disabled>${yesNo (!cfg.buffer.enable)}</disabled>'
 
-    # Enrollment verification is opt in, so assert both directions. An empty
+    # Enrollment settings are opt in, so assert both directions. An empty
     # <enrollment> block would be worse than none: it reads as configured.
-    test "$(grep -c '<enrollment>' ossec.conf)" -eq ${if enrollmentPaths == [ ] then "0" else "1"}
+    test "$(grep -c '<enrollment>' ossec.conf)" -eq ${if enrollmentSettings == [ ] then "0" else "1"}
+    ${lib.optionalString (cfg.registration.agentName != null) ''
+      grep -qF '<agent_name>${cfg.registration.agentName}</agent_name>' ossec.conf
+    ''}
+    ${lib.optionalString (cfg.registration.groups != [ ]) ''
+      grep -qF '<groups>${lib.concatStringsSep "," cfg.registration.groups}</groups>' ossec.conf
+    ''}
 
     # No FHS binary directory may survive the replacement above.
     if grep -qE '<directories>[^<]*/(usr/)?s?bin' ossec.conf; then

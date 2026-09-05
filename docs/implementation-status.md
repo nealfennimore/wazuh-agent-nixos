@@ -47,10 +47,12 @@ first-class option and no entry in the generated file.
 
 The template supplies the section. The module substitutes the manager
 address and port from `services.wazuh-agent.manager`. When
-`registration.caFile`, `registration.certFile` or `registration.keyFile` is
-set, the module adds an `<enrollment>` block with the matching paths. The
-enrollment options also drive the separate `wazuh-agent-auth` unit. Two
-template values stay hardcoded: `config-profile` and `crypto_method`.
+`registration.agentName`, `registration.groups`, `registration.caFile`,
+`registration.certFile` or `registration.keyFile` is set, the module adds
+an `<enrollment>` block with the matching elements. The enrollment options
+also drive the separate `wazuh-agent-auth` unit, through `-A`, `-G`, `-v`,
+`-x` and `-k`. Two template values stay hardcoded: `config-profile` and
+`crypto_method`.
 
 ### client_buffer
 

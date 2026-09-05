@@ -808,6 +808,58 @@ in
               are what matter.
             '';
           };
+
+          agentName = mkOption {
+            type = types.nullOr types.nonEmptyStr;
+            default = null;
+            example = "web-01";
+            description = ''
+              The name this agent enrolls under. When this is null, the
+              agent enrolls under its hostname.
+
+              The manager indexes agents by name, so the name must be unique
+              across the deployment. Both enrollment paths carry it: the
+              agent-auth unit passes -A, and the enrollment that wazuh-agentd
+              performs itself reads agent_name from ossec.conf.
+
+              A valid name is 2 to 128 characters, does not start with ".",
+              and uses only letters, digits, ".", "-" and "_"
+              (src/addagent/validate.c, OS_IsValidName). An assertion
+              carries the same rule, so a bad name fails at evaluation
+              rather than in the enrollment log.
+
+              The name applies at enrollment only. Once the agent is
+              registered, a change here does nothing until the agent
+              enrolls again. See the README for the re-enrollment steps.
+            '';
+          };
+
+          groups = mkOption {
+            type = types.listOf types.nonEmptyStr;
+            default = [ ];
+            example = [
+              "linux"
+              "webservers"
+            ];
+            description = ''
+              The groups this agent asks to join at enrollment. The empty
+              default leaves grouping to the manager, which assigns
+              "default".
+
+              Every group must already exist on the manager. authd checks
+              each name against its etc/shared directory and rejects the
+              whole enrollment when one is missing (os_auth/auth.c,
+              w_auth_validate_groups). So a typo here stops enrollment.
+              It does not create a group.
+
+              authd accepts at most 128 groups. A name holds at most 255
+              characters, from letters, digits, ".", "-" and "_". An
+              assertion carries the same rules.
+
+              The list applies at enrollment only, like agentName. The
+              manager owns group membership afterwards.
+            '';
+          };
         };
       };
     };
@@ -1217,6 +1269,47 @@ in
         '';
       }
       {
+        # First character and length together encode OS_IsValidName
+        # (src/addagent/validate.c:340): 2 to 128 characters, no leading
+        # ".", and only letters, digits, ".", "-" and "_". agent-auth and
+        # wazuh-agentd both exit with "Invalid agent name" at enrollment
+        # time, which on a fresh host means no enrollment and no clear
+        # pointer back to this option.
+        assertion =
+          cfg.registration.agentName == null
+          || builtins.match "[A-Za-z0-9_-][A-Za-z0-9._-]{1,127}" cfg.registration.agentName != null;
+        message = ''
+          services.wazuh-agent.registration.agentName holds a name the
+          manager rejects. A valid name is 2 to 128 characters, does not
+          start with ".", and uses only letters, digits, ".", "-" and "_"
+          (src/addagent/validate.c, OS_IsValidName).
+        '';
+      }
+      {
+        # The charset is authd's own regex "^[a-zA-Z0-9_\.\-]+$" plus its
+        # explicit "." and ".." rejection (os_auth/auth.c,
+        # w_auth_validate_groups). The bounds are MAX_GROUP_NAME and
+        # MAX_GROUPS_PER_MULTIGROUP from src/headers/defs.h. A violation
+        # would otherwise surface as "ERROR: Invalid group name" from the
+        # manager, after the agent already sent its key request.
+        assertion =
+          all (
+            group:
+            builtins.match "[A-Za-z0-9._-]+" group != null
+            && stringLength group <= 255
+            && group != "."
+            && group != ".."
+          ) cfg.registration.groups
+          && length cfg.registration.groups <= 128;
+        message = ''
+          services.wazuh-agent.registration.groups holds a name authd
+          rejects. A group name holds 1 to 255 characters from letters,
+          digits, ".", "-" and "_", and is not "." or "..". The list
+          holds at most 128 groups (os_auth/auth.c,
+          w_auth_validate_groups).
+        '';
+      }
+      {
         assertion = cfg.registration.certFile == null || cfg.registration.caFile != null;
         message = ''
           services.wazuh-agent.registration.certFile is set but
@@ -1325,6 +1418,18 @@ in
               ++ optional (cfg.registration.keyFile != null) "-k ${cfg.registration.keyFile}"
             );
 
+            # -A and -G are os_auth/main-client.c:167,215. The enrollment
+            # that wazuh-agentd performs itself reads the same identity
+            # from the <enrollment> block in ossec.conf, so both paths ask
+            # for the same name and groups. The assertions above keep both
+            # values inside a charset that needs no quoting here.
+            identityFlags = concatStringsSep " " (
+              optional (cfg.registration.agentName != null) "-A ${cfg.registration.agentName}"
+              ++ optional (
+                cfg.registration.groups != [ ]
+              ) "-G ${concatStringsSep "," cfg.registration.groups}"
+            );
+
             # Record the enrollment only when it produced a key. agent-auth
             # can report a failure and still exit 0, and ExecStartPost runs
             # on exit 0, so an unconditional touch marks a failed enrollment
@@ -1349,7 +1454,8 @@ in
             NoExecPaths = noExecStateDirsFor "wazuh-agent-auth";
             ExecStart =
               "${pkg}/bin/agent-auth -m ${host} -p ${toString cfg.registration.port}"
-              + optionalString (certFlags != "") " ${certFlags}";
+              + optionalString (certFlags != "") " ${certFlags}"
+              + optionalString (identityFlags != "") " ${identityFlags}";
             ExecStartPost = "${markRegistered}";
           };
       };

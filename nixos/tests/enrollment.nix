@@ -40,6 +40,14 @@ pkgs.testers.runNixOSTest {
         manager.host = nodes.manager.networking.primaryIPAddress;
         manager.port = 1514;
         registration.port = 1515;
+
+        # A name that differs from the node hostname, so the check below
+        # proves that -A reached authd. The group exercises -G against the
+        # one group every manager has. authd validates the group before it
+        # registers the agent, so a malformed group request would fail the
+        # enrollment itself.
+        registration.agentName = "example-agent";
+        registration.groups = [ "default" ];
       };
     };
 
@@ -111,11 +119,12 @@ pkgs.testers.runNixOSTest {
         agent.succeed("test -s /var/ossec/etc/client.keys")
 
         # The manager's own copy is the independent evidence. authd appends
-        # the agent to its client.keys, under the node hostname.
+        # the agent to its client.keys, under registration.agentName rather
+        # than the node hostname, which is what proves -A took effect.
         try:
             manager.wait_until_succeeds(
                 "docker exec wazuh-manager"
-                " grep -q ' agent ' /var/ossec/etc/client.keys",
+                " grep -q ' example-agent ' /var/ossec/etc/client.keys",
                 timeout=120,
             )
         except Exception:

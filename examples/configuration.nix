@@ -15,6 +15,12 @@
     # registration.host = "192.168.1.2";
     # registration.port = 1515;
 
+    # The name this agent enrolls under. Leave this out to enroll under the
+    # hostname. Groups the agent asks to join at enrollment. Each group must
+    # already exist on the manager.
+    # registration.agentName = "web-01";
+    # registration.groups = [ "linux" "webservers" ];
+
     # The enrollment password.
     #
     # Write this value as a quoted string, not as a bare path. A bare path
@@ -37,6 +43,7 @@
     '';
   };
 
-  # The agent reports the hostname to the manager. Set it before enrollment.
+  # Without registration.agentName, the agent enrolls under the hostname.
+  # Set the hostname before enrollment.
   networking.hostName = "nixos-agent-01";
 }

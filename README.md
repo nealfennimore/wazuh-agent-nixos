@@ -118,6 +118,8 @@ sudo systemctl restart wazuh.target
 | `registration.caFile` | `null` | CA that the manager is verified against. `null` means no verification. |
 | `registration.certFile` | `null` | Client certificate this agent presents. Needs `keyFile` and `caFile`. |
 | `registration.keyFile` | `null` | Private key for `certFile`. Keep it outside the store. |
+| `registration.agentName` | `null` | The name the agent enrolls under. `null` means the hostname. |
+| `registration.groups` | `[ ]` | Groups joined at enrollment. Each must already exist on the manager. |
 | `agentAuthPasswordFile` | `null` | A file that holds the enrollment password. |
 | `syscheck.directories` | `[ "/etc" "/boot" ]` | Directories that file integrity monitoring watches. |
 | `syscheck.ignore` | the two systemd credential stores | Paths excluded from monitoring. |
