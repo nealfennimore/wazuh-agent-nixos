@@ -1,39 +1,42 @@
 diff --git a/src/data_provider/src/packages/packageLinuxDataRetriever.h b/src/data_provider/src/packages/packageLinuxDataRetriever.h
-index 12e6c8fc24..63f88613a8 100644
+index 12e6c8fc24..f4bd868c03 100644
 --- a/src/data_provider/src/packages/packageLinuxDataRetriever.h
 +++ b/src/data_provider/src/packages/packageLinuxDataRetriever.h
-@@ -71,6 +71,13 @@ void getApkInfo(const std::string& libPath, std::function<void(nlohmann::json&)>
+@@ -71,6 +71,16 @@ void getApkInfo(const std::string& libPath, std::function<void(nlohmann::json&)>
   */
  void getSnapInfo(std::function<void(nlohmann::json&)> callback);
  
 +/**
 + * @brief Fills a JSON object with the packages in a NixOS system closure
 + * @param fileName Path to a file that lists the closure, one store path per line
++ * @param cpeMapFileName Path to a JSON object from pname to CPE vendor and product. Optional.
 + * @param callback Callback to be called for every single element being found
 + */
-+void getNixInfo(const std::string& fileName, std::function<void(nlohmann::json&)> callback);
++void getNixInfo(const std::string& fileName,
++                const std::string& cpeMapFileName,
++                std::function<void(nlohmann::json&)> callback);
 +
  // Exception template
  template <LinuxType linuxType>
  class FactoryPackagesCreator final
-@@ -116,6 +123,11 @@ class FactoryPackagesCreator<LinuxType::STANDARD> final
+@@ -116,6 +126,11 @@ class FactoryPackagesCreator<LinuxType::STANDARD> final
              {
                  getSnapInfo(callback);
              }
 +
 +            if (Utils::existsRegular(NIX_CLOSURE_PATH))
 +            {
-+                getNixInfo(NIX_CLOSURE_PATH, callback);
++                getNixInfo(NIX_CLOSURE_PATH, NIX_CPE_MAP_PATH, callback);
 +            }
          }
  
          static void getPythonPackages(std::unordered_set<std::string>& pythonPackages)
 diff --git a/src/data_provider/src/packages/packageLinuxNixParserHelper.h b/src/data_provider/src/packages/packageLinuxNixParserHelper.h
 new file mode 100644
-index 0000000000..f236dd6ddb
+index 0000000000..466c3e7e58
 --- /dev/null
 +++ b/src/data_provider/src/packages/packageLinuxNixParserHelper.h
-@@ -0,0 +1,310 @@
+@@ -0,0 +1,404 @@
 +/*
 + * Wazuh SYSINFO
 + * Copyright (C) 2015, Wazuh Inc.
@@ -51,6 +54,7 @@ index 0000000000..f236dd6ddb
 +#include <algorithm>
 +#include <array>
 +#include <cctype>
++#include <fstream>
 +#include <map>
 +#include <string>
 +#include <string_view>
@@ -110,7 +114,8 @@ index 0000000000..f236dd6ddb
 +
 +    // nixpkgs names that differ from the NVD product name for the same
 +    // software. The manager looks vulnerability candidates up by product
-+    // name, so a name that differs matches nothing.
++    // name, so a name that differs matches nothing. The CPE map from the
++    // host takes precedence; this table is what remains without one.
 +    static const std::map<std::string, std::string> s_nixProductNames
 +    {
 +        {"linux", "linux_kernel"},
@@ -118,6 +123,85 @@ index 0000000000..f236dd6ddb
 +        {"python3", "python"},
 +        {"nodejs", "node.js"},
 +    };
++
++    // The CPE vendor and product for one nixpkgs pname.
++    struct NixCpe
++    {
++        std::string vendor;
++        std::string product;
++    };
++
++    using NixCpeMap = std::map<std::string, NixCpe>;
++
++    /**
++     * @brief Reads the CPE map that the NixOS module writes beside the
++     *        closure.
++     *
++     * The file is a JSON object. Each key is a nixpkgs pname in lower case,
++     * and each value an object with "vendor" and, optionally, "product".
++     * The module builds it from meta.identifiers.cpeParts of the packages
++     * it can see at evaluation time, plus host overrides. An entry without
++     * a vendor is dropped, because a vendor is the one thing the manager
++     * cannot do without.
++     *
++     * @param fileName Path to the file.
++     * @return The map, empty when the file is absent or is not a JSON
++     *         object.
++     */
++    static NixCpeMap loadNixCpeMap(const std::string& fileName)
++    {
++        NixCpeMap cpeMap;
++        std::ifstream file(fileName);
++
++        if (!file.is_open())
++        {
++            return cpeMap;
++        }
++
++        nlohmann::json document;
++
++        try
++        {
++            file >> document;
++        }
++        catch (const nlohmann::json::exception&)
++        {
++            return cpeMap;
++        }
++
++        if (!document.is_object())
++        {
++            return cpeMap;
++        }
++
++        for (const auto& [pname, entry] : document.items())
++        {
++            if (!entry.is_object() || !entry.contains("vendor") || !entry.at("vendor").is_string())
++            {
++                continue;
++            }
++
++            const auto vendor = entry.at("vendor").get<std::string>();
++
++            if (vendor.empty())
++            {
++                continue;
++            }
++
++            auto product = entry.contains("product") && entry.at("product").is_string()
++                           ? entry.at("product").get<std::string>()
++                           : pname;
++
++            if (product.empty())
++            {
++                product = pname;
++            }
++
++            cpeMap[pname] = NixCpe {vendor, product};
++        }
++
++        return cpeMap;
++    }
 +
 +    static bool nixEndsWith(const std::string_view value, const std::string_view suffix)
 +    {
@@ -230,16 +314,23 @@ index 0000000000..f236dd6ddb
 +     * The line is a store path. Its name part follows the nixpkgs convention
 +     * "<pname>-<version>[-<output>]", which is the only information the
 +     * store carries about an installed package: no vendor, no description,
-+     * no install time and no record of patches that nixpkgs applied.
++     * no install time and no record of patches that nixpkgs applied. The
++     * vendor, and a product name that differs from the pname, come from
++     * the CPE map when the host supplies one.
 +     *
 +     * @param line         One store path, with or without surrounding
 +     *                     whitespace.
 +     * @param architecture The machine architecture to record. The store path
 +     *                     does not carry it.
++     * @param cpeMap       pname to CPE vendor and product. See
++     *                     loadNixCpeMap. Not consulted for Python packages,
++     *                     which the PyPI feed matches by name alone.
 +     * @return The package row, or an empty object when the line is not a
 +     *         versioned package.
 +     */
-+    static nlohmann::json parseNixStorePath(const std::string& line, const std::string& architecture)
++    static nlohmann::json parseNixStorePath(const std::string& line,
++                                            const std::string& architecture,
++                                            const NixCpeMap& cpeMap = {})
 +    {
 +        nlohmann::json packageInfo;
 +
@@ -311,12 +402,18 @@ index 0000000000..f236dd6ddb
 +        });
 +
 +        std::string format {"nix"};
++        std::string vendor {UNKNOWN_VALUE};
 +        std::string pypiName;
 +
 +        if (isNixPythonPackage(name, pypiName))
 +        {
 +            name = pypiName;
 +            format = "pypi";
++        }
++        else if (const auto cpe = cpeMap.find(name); cpe != cpeMap.end())
++        {
++            vendor = cpe->second.vendor;
++            name = cpe->second.product;
 +        }
 +        else if (const auto product = s_nixProductNames.find(name); product != s_nixProductNames.end())
 +        {
@@ -330,7 +427,7 @@ index 0000000000..f236dd6ddb
 +        packageInfo["location"] = storePath;
 +        packageInfo["description"] = drvName;
 +        packageInfo["source"] = "nixpkgs";
-+        packageInfo["vendor"] = UNKNOWN_VALUE;
++        packageInfo["vendor"] = vendor;
 +        packageInfo["install_time"] = UNKNOWN_VALUE;
 +        packageInfo["groups"] = UNKNOWN_VALUE;
 +        packageInfo["priority"] = UNKNOWN_VALUE;
@@ -346,10 +443,10 @@ index 0000000000..f236dd6ddb
 +#endif // _PACKAGE_LINUX_NIX_PARSER_HELPER_H
 diff --git a/src/data_provider/src/packages/packageLinuxParserNix.cpp b/src/data_provider/src/packages/packageLinuxParserNix.cpp
 new file mode 100644
-index 0000000000..1e2cf12ab5
+index 0000000000..948f2cac9e
 --- /dev/null
 +++ b/src/data_provider/src/packages/packageLinuxParserNix.cpp
-@@ -0,0 +1,68 @@
+@@ -0,0 +1,74 @@
 +/*
 + * Wazuh SYSINFO
 + * Copyright (C) 2015, Wazuh Inc.
@@ -368,7 +465,9 @@ index 0000000000..1e2cf12ab5
 +#include "json.hpp"
 +#include "packageLinuxNixParserHelper.h"
 +
-+void getNixInfo(const std::string& fileName, std::function<void(nlohmann::json&)> callback)
++void getNixInfo(const std::string& fileName,
++                const std::string& cpeMapFileName,
++                std::function<void(nlohmann::json&)> callback)
 +{
 +    std::ifstream closure(fileName);
 +
@@ -380,6 +479,10 @@ index 0000000000..1e2cf12ab5
 +    struct utsname uts {};
 +    const std::string architecture {uname(&uts) == 0 ? uts.machine : UNKNOWN_VALUE};
 +
++    // Absent or malformed, the map is empty and every row keeps the blank
++    // vendor, which is what the agent reported before the map existed.
++    const auto cpeMap = PackageLinuxHelper::loadNixCpeMap(cpeMapFileName);
++
 +    // One row per installed package, not per store path. A package with
 +    // several outputs, or two builds of the same version, is listed once,
 +    // and the shortest store path wins because it is the one without an
@@ -389,7 +492,7 @@ index 0000000000..1e2cf12ab5
 +
 +    while (std::getline(closure, line))
 +    {
-+        auto packageInfo = PackageLinuxHelper::parseNixStorePath(line, architecture);
++        auto packageInfo = PackageLinuxHelper::parseNixStorePath(line, architecture, cpeMap);
 +
 +        if (packageInfo.empty())
 +        {
@@ -419,10 +522,10 @@ index 0000000000..1e2cf12ab5
 +    }
 +}
 diff --git a/src/data_provider/src/sharedDefs.h b/src/data_provider/src/sharedDefs.h
-index d6c77b16f3..bd52781fa3 100644
+index d6c77b16f3..9ccd473d7c 100644
 --- a/src/data_provider/src/sharedDefs.h
 +++ b/src/data_provider/src/sharedDefs.h
-@@ -38,6 +38,11 @@ constexpr auto APK_PATH {"/lib/apk/db"};
+@@ -38,6 +38,18 @@ constexpr auto APK_PATH {"/lib/apk/db"};
  constexpr auto APK_DB_PATH {"/lib/apk/db/installed"};
  constexpr auto SNAP_PATH {"/var/lib/snapd"};
  
@@ -431,22 +534,31 @@ index d6c77b16f3..bd52781fa3 100644
 +// agent home, like SYSCOLLECTOR_DB_DISK_PATH in headers/defs.h.
 +constexpr auto NIX_CLOSURE_PATH {"queue/syscollector/nix-closure"};
 +
++// Written by the host beside the closure. A JSON object from nixpkgs pname
++// to the CPE vendor and product that the NixOS module read from
++// meta.identifiers. The manager rejects every NVD candidate for a package
++// without a vendor, so a package absent from this file matches nothing
++// from the NVD.
++constexpr auto NIX_CPE_MAP_PATH {"queue/syscollector/nix-cpe-map"};
++
  constexpr auto UNKNOWN_VALUE {" "};
  constexpr auto MAC_ADDRESS_COUNT_SEGMENTS
  {
 diff --git a/src/data_provider/tests/sysInfoPackagesLinuxHelper/sysInfoPackagesLinuxHelper_test.cpp b/src/data_provider/tests/sysInfoPackagesLinuxHelper/sysInfoPackagesLinuxHelper_test.cpp
-index 00316067d2..600372edfb 100644
+index 00316067d2..0d4c111775 100644
 --- a/src/data_provider/tests/sysInfoPackagesLinuxHelper/sysInfoPackagesLinuxHelper_test.cpp
 +++ b/src/data_provider/tests/sysInfoPackagesLinuxHelper/sysInfoPackagesLinuxHelper_test.cpp
-@@ -15,6 +15,7 @@
+@@ -15,6 +15,9 @@
  #include "packages/packageLinuxRpmParserHelper.h"
  #include "packages/packageLinuxRpmParserHelperLegacy.h"
  #include "packages/packageLinuxApkParserHelper.h"
 +#include "packages/packageLinuxNixParserHelper.h"
++#include <cstdio>
++#include <fstream>
  #include "packages/rpmPackageManager.h"
  #include <alpm.h>
  #include <package.h>
-@@ -745,3 +746,164 @@ TEST_F(SysInfoPackagesLinuxHelperTest, parseSnapWrongJSON)
+@@ -745,3 +748,277 @@ TEST_F(SysInfoPackagesLinuxHelperTest, parseSnapWrongJSON)
      });
  }
  
@@ -610,4 +722,117 @@ index 00316067d2..600372edfb 100644
 +    {
 +        EXPECT_TRUE(PackageLinuxHelper::parseNixStorePath(line, "x86_64").empty()) << line;
 +    }
++}
++
++TEST_F(SysInfoPackagesLinuxHelperTest, parseNixStorePathAppliesCpeMap)
++{
++    const PackageLinuxHelper::NixCpeMap cpeMap
++    {
++        {"glibc", {"gnu", "glibc"}},
++        {"linux", {"linux", "linux_kernel"}},
++        {"python3", {"python", "python"}},
++    };
++
++    // Vendor and product from the map.
++    const auto& kernel
++    {
++        PackageLinuxHelper::parseNixStorePath(
++            "/nix/store/61r7fpwz7hk9v7yn1h6jvrn0d5d7fl5c-linux-6.18.44", "x86_64", cpeMap)
++    };
++    EXPECT_EQ("linux_kernel", kernel.at("name"));
++    EXPECT_EQ("linux", kernel.at("vendor"));
++    EXPECT_EQ("nix", kernel.at("format"));
++
++    // The map wins over the built-in rename table.
++    const auto& interpreter
++    {
++        PackageLinuxHelper::parseNixStorePath(
++            "/nix/store/61r7fpwz7hk9v7yn1h6jvrn0d5d7fl5c-python3-3.13.2", "x86_64", cpeMap)
++    };
++    EXPECT_EQ("python", interpreter.at("name"));
++    EXPECT_EQ("python", interpreter.at("vendor"));
++
++    // The key is the lower-case pname, before the output suffix is removed.
++    const auto& glibc
++    {
++        PackageLinuxHelper::parseNixStorePath(
++            "/nix/store/61r7fpwz7hk9v7yn1h6jvrn0d5d7fl5c-glibc-2.40-66-bin", "x86_64", cpeMap)
++    };
++    EXPECT_EQ("glibc", glibc.at("name"));
++    EXPECT_EQ("gnu", glibc.at("vendor"));
++    EXPECT_EQ("2.40-66", glibc.at("version"));
++
++    // A package the map does not name keeps the blank vendor, and the
++    // built-in rename table still applies to it.
++    const auto& bash
++    {
++        PackageLinuxHelper::parseNixStorePath(
++            "/nix/store/bwry105g7v5jspr41bx9x3fcfqsmfkq2-bash-interactive-5.3p15", "x86_64", cpeMap)
++    };
++    EXPECT_EQ("bash", bash.at("name"));
++    EXPECT_EQ(UNKNOWN_VALUE, bash.at("vendor"));
++
++    // Python packages go to the PyPI feed by name. The map is not consulted.
++    const PackageLinuxHelper::NixCpeMap pythonMap {{"requests", {"python-requests", "requests"}}};
++    const auto& requests
++    {
++        PackageLinuxHelper::parseNixStorePath(
++            "/nix/store/61r7fpwz7hk9v7yn1h6jvrn0d5d7fl5c-python3.13-requests-2.32.3", "x86_64", pythonMap)
++    };
++    EXPECT_EQ("requests", requests.at("name"));
++    EXPECT_EQ("pypi", requests.at("format"));
++    EXPECT_EQ(UNKNOWN_VALUE, requests.at("vendor"));
++}
++
++TEST_F(SysInfoPackagesLinuxHelperTest, loadNixCpeMapReadsVendorsAndDropsIncompleteEntries)
++{
++    const std::string fileName {"/tmp/sysInfoPackagesLinuxHelper_nix-cpe-map.json"};
++    {
++        std::ofstream file(fileName);
++        file << R"({
++            "glibc": {"vendor": "gnu", "product": "glibc"},
++            "linux": {"vendor": "linux", "product": "linux_kernel"},
++            "openssl": {"vendor": "openssl"},
++            "empty-product": {"vendor": "acme", "product": ""},
++            "no-vendor": {"product": "something"},
++            "blank-vendor": {"vendor": ""},
++            "not-an-object": "gnu",
++            "wrong-types": {"vendor": 1, "product": 2}
++        })";
++    }
++
++    const auto cpeMap = PackageLinuxHelper::loadNixCpeMap(fileName);
++    std::remove(fileName.c_str());
++
++    ASSERT_EQ(4u, cpeMap.size());
++    EXPECT_EQ("gnu", cpeMap.at("glibc").vendor);
++    EXPECT_EQ("glibc", cpeMap.at("glibc").product);
++    EXPECT_EQ("linux_kernel", cpeMap.at("linux").product);
++    // The product defaults to the pname.
++    EXPECT_EQ("openssl", cpeMap.at("openssl").vendor);
++    EXPECT_EQ("openssl", cpeMap.at("openssl").product);
++    EXPECT_EQ("empty-product", cpeMap.at("empty-product").product);
++    EXPECT_EQ(0u, cpeMap.count("no-vendor"));
++    EXPECT_EQ(0u, cpeMap.count("blank-vendor"));
++    EXPECT_EQ(0u, cpeMap.count("not-an-object"));
++    EXPECT_EQ(0u, cpeMap.count("wrong-types"));
++}
++
++TEST_F(SysInfoPackagesLinuxHelperTest, loadNixCpeMapToleratesMissingOrMalformedFiles)
++{
++    EXPECT_TRUE(PackageLinuxHelper::loadNixCpeMap("/nonexistent/nix-cpe-map").empty());
++
++    const std::string fileName {"/tmp/sysInfoPackagesLinuxHelper_nix-cpe-map-broken.json"};
++    {
++        std::ofstream file(fileName);
++        file << "{ this is not json";
++    }
++    EXPECT_TRUE(PackageLinuxHelper::loadNixCpeMap(fileName).empty());
++
++    {
++        std::ofstream file(fileName);
++        file << R"(["an", "array"])";
++    }
++    EXPECT_TRUE(PackageLinuxHelper::loadNixCpeMap(fileName).empty());
++    std::remove(fileName.c_str());
 +}

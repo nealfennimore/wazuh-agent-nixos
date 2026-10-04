@@ -108,8 +108,9 @@ behind them.
 - `wodle name="syscollector"` runs hourly with hardware, OS, network and
   package scans. The package scan finds nothing on a stock NixOS host, so
   patch 06 in `pkgs/patches` adds a collector that reads the system closure
-  that the `wazuh-nix-inventory` unit writes. The README section
-  "Vulnerability detection" describes it.
+  that the `wazuh-nix-inventory` unit writes, and the CPE map beside it
+  that gives each package the vendor the NVD feed requires. The README
+  section "Vulnerability detection" describes both.
 
 The template also ships a disabled `wodle name="open-scap"` block. Upstream
 removed that module, so the block is dead configuration.

@@ -135,6 +135,10 @@ sudo systemctl restart wazuh.target
 | `logging.json` | `false` | Writes the agent's own log as JSON, to `logs/ossec.json`. |
 | `packageInventory.enable` | `config.nix.enable` | Lists the Nix packages of the running system for vulnerability detection. |
 | `packageInventory.interval` | `"daily"` | The scheduled refresh of that list. Each registered generation refreshes it too. |
+| `packageInventory.cpe.packages` | `[ ]` | Derivations whose `meta.identifiers` feed the CPE map, besides `environment.systemPackages` and the kernel. |
+| `packageInventory.cpe.attrNames` | deep-closure list | Attribute paths in `pkgs` whose `meta.identifiers` feed the CPE map. |
+| `packageInventory.cpe.fallbacks` | hand-checked list | CPEs for pnames that nixpkgs has not annotated. Used only where nixpkgs says nothing. |
+| `packageInventory.cpe.overrides` | `{ }` | The host's final word on a pname's CPE vendor and product. |
 | `activeResponse.enable` | `false` | Lets the agent act on a finding, not only report it. |
 | `activeResponse.capability.<name>.enable` | see below | Whether that response is provisioned. |
 | `extraConfig` | `""` | XML appended to the generated `ossec.conf`. |
@@ -260,6 +264,55 @@ generic version parser and the NVD feed, which matches on package name.
 Python packages from nixpkgs are reported with format `pypi` instead, which
 routes them to the PyPI feed.
 
+#### The CPE map
+
+Every NVD entry names a vendor, and the manager rejects a candidate when
+the package carries no vendor or a different one. A store path carries
+none. Without a vendor, a `nix` row matches nothing from the NVD and only
+the `pypi` rows produce findings.
+
+So the unit also writes `/var/ossec/queue/syscollector/nix-cpe-map`, a
+JSON object from pname to CPE vendor and product, and the collector
+attaches those to each row:
+
+```json
+{"glibc":{"product":"glibc","vendor":"gnu"},"linux":{"product":"linux_kernel","vendor":"linux"}}
+```
+
+`nixos/wazuh-agent/cpe-map.nix` builds the map at evaluation time. The
+data comes from nixpkgs: since February 2026 a package can declare
+`meta.identifiers.cpeParts`, and nixpkgs derives `meta.identifiers.cpe`
+from it once a vendor is present. The map reads that attribute from every
+derivation the module can see, which is `environment.systemPackages`, the
+kernel, a list of deep-closure attribute names resolved against `pkgs`,
+and any packages the host adds. Three layers combine, later ones winning:
+
+1. `packageInventory.cpe.fallbacks`. Hand-checked CPEs for core packages
+   that nixpkgs has not annotated yet. Used only where nixpkgs says
+   nothing.
+2. `meta.identifiers` from nixpkgs. Coverage grows with each nixpkgs
+   bump, and this repository does not change for it.
+3. `packageInventory.cpe.overrides`. The host's final word.
+
+To see the map for this flake's nixpkgs, and which layer each entry came
+from:
+
+```bash
+./examples/show-cpe-map.sh
+./examples/show-cpe-map.sh glibc openssl   # raw meta.identifiers
+```
+
+A service package is in the closure but not in `environment.systemPackages`.
+Add it to `packageInventory.cpe.packages` so its metadata is read:
+
+```nix
+services.wazuh-agent.packageInventory.cpe.packages = [ config.services.nginx.package ];
+```
+
+A package absent from the map keeps a blank vendor and matches nothing from
+the NVD. That is the behavior before the map existed, so an incomplete map
+adds findings without adding false positives.
+
 The unit runs as the `wazuh` user with no network. The query is a
 conversation with the Nix daemon over its Unix socket, and the daemon
 answers from the local store database. It runs once before
@@ -273,8 +326,12 @@ To check the result on the agent:
 
 ```bash
 sudo sqlite3 /var/ossec/queue/syscollector/db/local.db \
-  "select name, version, format from dbsync_packages where source = 'nixpkgs' limit 20"
+  "select name, version, format, vendor from dbsync_packages where source = 'nixpkgs' limit 20"
 ```
+
+A row with a blank vendor and format `nix` cannot match the NVD. Add the
+package to the map through `packageInventory.cpe.overrides`, or to the
+nixpkgs package as `meta.identifiers.cpeParts`.
 
 To check the result on the manager, raise `wazuh_modules.debug` to 2 in
 `local_internal_options.conf` and read `ossec.log` for the agent's scan
@@ -283,16 +340,15 @@ rejected.
 
 Four limits remain:
 
-- The store path carries no vendor. An NVD entry that names a vendor
-  rejects a package without one. Entries for Homebrew packages, which
-  also carry no vendor, still match, so this is a minority of entries.
+- A package that no layer of the CPE map names has no vendor and matches
+  nothing from the NVD. `examples/show-cpe-map.sh` lists those under
+  `unresolved`.
+- The manager compares the vendor literally. A product that the NVD has
+  filed under two vendors over time, as `haxx:curl` and `curl:curl`,
+  matches only the one the map names.
 - nixpkgs applies many fixes as patches without a version bump. Those
   show as open findings. The same is true of every scanner that reads
   only name and version.
-- A nixpkgs name that differs from the NVD product name matches nothing.
-  The collector renames the four most common cases, in
-  `packageLinuxNixParserHelper.h`. Add to that table when a package you
-  care about is missing.
 - There is no operating system entry. NixOS itself has no advisory feed
   that the manager reads.
 

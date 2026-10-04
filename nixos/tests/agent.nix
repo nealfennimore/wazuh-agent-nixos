@@ -1174,6 +1174,37 @@ pkgs.testers.runNixOSTest {
             timeout=60,
         )
 
+    with subtest("the CPE map gives the Nix packages a vendor"):
+        # The manager rejects every NVD candidate for a package without a
+        # vendor, so the map is what makes the inventory scannable. The
+        # unit writes it beside the closure from the module's evaluation.
+        cpe_map = "/var/ossec/queue/syscollector/nix-cpe-map"
+        agent.succeed(f"test $(stat -c %U:%G {cpe_map}) = wazuh:wazuh")
+        agent.succeed(f"test $(stat -c %a {cpe_map}) = 640")
+        # A JSON object, with the kernel entry from the default fallbacks.
+        agent.succeed(f"grep -q '^{{' {cpe_map}")
+        agent.succeed(
+            f"grep -q '\"linux\":{{\"product\":\"linux_kernel\",\"vendor\":\"linux\"}}' {cpe_map}"
+        )
+
+        # The kernel and the C library are in every closure. Both get their
+        # vendor from the map, and the kernel its product name from it too,
+        # so the row no longer depends on the collector's built-in table.
+        agent.wait_until_succeeds(
+            "test $(" + rows("name = 'linux_kernel' and vendor = 'linux'") + ") -gt 0",
+            timeout=60,
+        )
+        agent.wait_until_succeeds(
+            "test $(" + rows("name = 'glibc' and vendor = 'gnu'") + ") -gt 0",
+            timeout=60,
+        )
+        # Python packages keep the blank vendor. The PyPI feed matches by
+        # name and carries no vendor to compare.
+        agent.wait_until_succeeds(
+            "test $(" + rows("format = 'pypi' and vendor != ' '") + ") -eq 0",
+            timeout=60,
+        )
+
     with subtest("a new generation refreshes the list"):
         # nixos-rebuild switch and boot register the new system as a link in
         # the profiles directory. Register the running system again under a

@@ -115,6 +115,8 @@
             pkgs.nixfmt
             pkgs.curl
             pkgs.gitMinimal
+            # examples/show-cpe-map.sh pretty-prints with it.
+            pkgs.jq
           ];
         };
       }

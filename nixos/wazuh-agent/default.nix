@@ -1115,6 +1115,13 @@ in
         scan and reports one package per name and version. The manager
         matches those against the NVD feed.
 
+        The NVD feed names a vendor on every entry, and the manager rejects
+        a candidate when the package carries no vendor or a different one.
+        A store path carries none. So the unit also writes
+        queue/syscollector/nix-cpe-map, a JSON object from pname to CPE
+        vendor and product, which the collector attaches to each row. The
+        cpe option says where that map comes from.
+
         The unit runs as the wazuh user with no network. The query is a
         conversation with the Nix daemon over its Unix socket, which any
         local user may open, and the daemon answers from the local store
@@ -1145,6 +1152,102 @@ in
               list also refreshes after every registered generation, so the
               schedule covers nixos-rebuild test, which registers none.
             '';
+          };
+
+          cpe = mkOption {
+            description = ''
+              Where the CPE vendor and product for each Nix package come
+              from. nixos/wazuh-agent/cpe-map.nix builds the map at
+              evaluation time from three layers, later ones winning:
+              fallbacks, then meta.identifiers of every derivation it can
+              see, then overrides. The derivations it can see are
+              environment.systemPackages, the kernel, attrNames resolved
+              against pkgs, and packages.
+
+              nixpkgs carries meta.identifiers.cpeParts on a growing set of
+              packages, so the map improves with every nixpkgs bump.
+              examples/show-cpe-map.sh prints the result and which layer
+              each entry came from. Keys are lower-case pnames as they
+              appear in store paths. Nothing here builds anything.
+            '';
+            default = { };
+            type = types.submodule {
+              options =
+                let
+                  cpeEntry = types.submodule (
+                    { name, ... }:
+                    {
+                      options = {
+                        vendor = mkOption {
+                          type = types.nonEmptyStr;
+                          example = "gnu";
+                          description = "The CPE vendor, lower case.";
+                        };
+                        product = mkOption {
+                          type = types.nonEmptyStr;
+                          default = name;
+                          defaultText = literalExpression "<the pname>";
+                          example = "linux_kernel";
+                          description = "The CPE product, lower case. Defaults to the pname.";
+                        };
+                      };
+                    }
+                  );
+                in
+                {
+                  packages = mkOption {
+                    type = types.listOf types.package;
+                    default = [ ];
+                    example = literalExpression "[ config.services.nginx.package ]";
+                    description = ''
+                      Derivations whose meta.identifiers feed the map, in
+                      addition to environment.systemPackages and the kernel.
+                      Service packages are the usual case: a service puts its
+                      package in the closure without listing it in
+                      environment.systemPackages.
+                    '';
+                  };
+
+                  attrNames = mkOption {
+                    type = types.listOf types.str;
+                    default = (import ./cpe-map.nix).defaultAttrNames;
+                    defaultText = literalExpression "(import ./cpe-map.nix).defaultAttrNames";
+                    description = ''
+                      Attribute paths in pkgs whose meta.identifiers feed the
+                      map. The default names the deep closure that nothing
+                      in environment.systemPackages lists: the C library,
+                      TLS, compression, the init system. A name this nixpkgs
+                      lacks is skipped.
+                    '';
+                  };
+
+                  fallbacks = mkOption {
+                    type = types.attrsOf cpeEntry;
+                    default = (import ./cpe-map.nix).defaultFallbacks;
+                    defaultText = literalExpression "(import ./cpe-map.nix).defaultFallbacks";
+                    description = ''
+                      CPEs for pnames that nixpkgs has not annotated. Used
+                      only where meta.identifiers says nothing. Set to { }
+                      to trust nixpkgs alone.
+                    '';
+                  };
+
+                  overrides = mkOption {
+                    type = types.attrsOf cpeEntry;
+                    default = { };
+                    example = literalExpression ''
+                      {
+                        curl = { vendor = "haxx"; };
+                        my-tool = { vendor = "example"; product = "tool"; };
+                      }
+                    '';
+                    description = ''
+                      The host's final word, over both nixpkgs and the
+                      fallbacks.
+                    '';
+                  };
+                };
+            };
           };
         };
       };
@@ -1570,9 +1673,26 @@ in
           NoExecPaths = noExecStateDirsFor "wazuh-nix-inventory";
           ExecStart =
             let
-              # The list is replaced by a rename, so syscollector never
-              # reads a half-written file. mode 0640 under the wazuh group
-              # matches the files beside it.
+              # pname -> { vendor, product }, from nixpkgs metadata and the
+              # cpe option. Built here, at evaluation time, because the
+              # store carries no metadata and the unit has no network.
+              cpeMap = import ./cpe-map.nix;
+              cpeMapFile = pkgs.writeText "wazuh-nix-cpe-map.json" (
+                builtins.toJSON (
+                  cpeMap.build {
+                    inherit lib pkgs;
+                    packages =
+                      config.environment.systemPackages
+                      ++ [ config.boot.kernelPackages.kernel ]
+                      ++ cfg.packageInventory.cpe.packages;
+                    inherit (cfg.packageInventory.cpe) attrNames fallbacks overrides;
+                  }
+                )
+              );
+
+              # Both files are replaced by a rename, so syscollector never
+              # reads a half-written one. mode 0640 under the wazuh group
+              # matches the files beside them.
               script = pkgs.writeShellApplication {
                 name = "wazuh-nix-inventory";
                 runtimeInputs = [
@@ -1582,8 +1702,14 @@ in
                 text = ''
                   dir=${stateDir}/queue/syscollector
                   install -d -m 0750 "$dir"
-                  tmp=$(mktemp "$dir/.nix-closure.XXXXXX")
+
+                  tmp=$(mktemp "$dir/.nix-cpe-map.XXXXXX")
                   trap 'rm -f "$tmp"' EXIT
+                  cp ${cpeMapFile} "$tmp"
+                  chmod 0640 "$tmp"
+                  mv -f "$tmp" "$dir/nix-cpe-map"
+
+                  tmp=$(mktemp "$dir/.nix-closure.XXXXXX")
                   nix-store --query --requisites /run/current-system > "$tmp"
                   chmod 0640 "$tmp"
                   mv -f "$tmp" "$dir/nix-closure"
