@@ -1,0 +1,113 @@
+# Builds the agent on every push and pull request and pushes the results to a
+# Cachix binary cache.
+#
+# Setup, once:
+#   1. Create a cache at https://app.cachix.org and copy its public key into
+#      the README section "Use the binary cache".
+#   2. Add the cache's auth token as the repository secret CACHIX_AUTH_TOKEN.
+#   3. If the cache is not named wazuh-agent-nixos, set the repository variable
+#      CACHIX_CACHE to its name.
+#
+# The checkout omits the modules/wazuh submodule on purpose. The package then
+# fetches the same commit from GitHub, which is also what a consumer of this
+# flake gets, so the store paths that land in the cache are the ones they need.
+#
+# checks.enrollment and checks.integration do not run here. One pulls a
+# multi-gigabyte image from Docker Hub, the other runs for hours.
+
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CACHIX_CACHE: ${{ vars.CACHIX_CACHE || 'wazuh-agent' }}
+
+jobs:
+  build:
+    name: build (${{ matrix.system }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-latest
+          - system: aarch64-linux
+            # Free for public repositories. For a private repository, drop this
+            # entry or point it at a self-hosted ARM runner.
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        # The runner image ships toolchains that this build never uses. The
+        # Wazuh dependency tarballs and the build tree need the room.
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/.ghcup
+          df -h /
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            accept-flake-config = false
+
+      - uses: cachix/cachix-action@v16
+        with:
+          name: ${{ env.CACHIX_CACHE }}
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          # Pull requests from forks have no secrets. Only pushes to main
+          # publish to the cache.
+          skipPush: ${{ github.event_name != 'push' }}
+
+      - name: Build packages
+        run: |
+          nix build -L --no-link \
+            .#packages.${{ matrix.system }}.wazuh-agent \
+            .#packages.${{ matrix.system }}.wazuh-testing
+
+      - name: Show closure size
+        run: |
+          nix path-info -S -h .#packages.${{ matrix.system }}.wazuh-agent
+
+  test:
+    name: checks.agent (x86_64-linux)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable KVM
+        # GitHub's Linux runners expose /dev/kvm, but only root can open it.
+        # The Nix build users need it for the NixOS VM test.
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            system-features = nixos-test benchmark big-parallel kvm
+
+      - uses: cachix/cachix-action@v16
+        with:
+          name: ${{ env.CACHIX_CACHE }}
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          # The test VM closure is large and nobody substitutes it. Read the
+          # agent from the cache, push nothing.
+          skipPush: true
+
+      - name: Run the module test
+        run: nix build -L --no-link .#checks.x86_64-linux.agent

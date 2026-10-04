@@ -584,6 +584,42 @@ nix build .#wazuh-agent
 The build fetches 27 dependency tarballs from `packages.wazuh.com`. The build
 host must reach that server.
 
+## Use the binary cache
+
+GitHub Actions builds `wazuh-agent` for both systems on every push to `main`
+and pushes the result to Cachix. The workflow is `.github/workflows/build.yml`.
+It also runs `checks.agent` on `x86_64-linux`. It does not run the enrollment
+or integration checks.
+
+To use the cache, add it to the host that builds the agent:
+
+```nix
+nix.settings = {
+  substituters = [ "https://wazuh-agent-nixos.cachix.org" ];
+  trusted-public-keys = [ "wazuh-agent-nixos.cachix.org-1:<public key>" ];
+};
+```
+
+The public key is on the cache page at `https://app.cachix.org`. Replace
+`<public key>` with it.
+
+The cache holds the build that fetches the Wazuh source from GitHub. A flake
+input without `?submodules=1`, as in the first section, produces the same
+store path and gets a cache hit. A local checkout with the `modules/wazuh`
+submodule populated produces a different store path and builds from source.
+
+### Set up the workflow
+
+1. Create a cache at `https://app.cachix.org`.
+2. Create an auth token for the cache with write access.
+3. Add the token as the repository secret `CACHIX_AUTH_TOKEN`.
+4. If the cache is not named `wazuh-agent-nixos`, add the repository
+   variable `CACHIX_CACHE` with its name.
+
+Pull requests build but do not push. The `aarch64-linux` job uses the
+`ubuntu-24.04-arm` runner, which GitHub provides at no cost to public
+repositories only.
+
 ## Move to a new Wazuh version
 
 1. Move the `modules/wazuh` submodule to the new tag.
