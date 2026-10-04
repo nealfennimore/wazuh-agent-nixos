@@ -1100,6 +1100,56 @@ in
       };
     };
 
+    packageInventory = mkOption {
+      description = ''
+        The package inventory that the manager's vulnerability detection
+        reads.
+
+        Syscollector collects packages from the dpkg, rpm, pacman, apk and
+        snap databases, and NixOS has none of them, so the manager received
+        an empty inventory and scanned nothing. With this on, the
+        wazuh-nix-inventory unit lists the runtime closure of the activated
+        system with `nix-store --query --requisites /run/current-system` and
+        writes it to queue/syscollector/nix-closure. The agent, through
+        patch 06 in pkgs/patches, reads that file at every syscollector
+        scan and reports one package per name and version. The manager
+        matches those against the NVD feed.
+
+        The unit runs as the wazuh user with no network. The query is a
+        conversation with the Nix daemon over its Unix socket, which any
+        local user may open, and the daemon answers from the local store
+        database. It runs once at boot, after every generation that
+        nixos-rebuild switch or boot registers,
+        and on the schedule in interval.
+      '';
+      default = { };
+      type = types.submodule {
+        options = {
+          enable = mkOption {
+            type = types.bool;
+            default = config.nix.enable;
+            defaultText = literalExpression "config.nix.enable";
+            description = ''
+              Whether to list the Nix packages of the running system for the
+              manager. Needs the Nix daemon, which is how an unprivileged
+              user reads the store database.
+            '';
+          };
+
+          interval = mkOption {
+            type = types.nonEmptyStr;
+            default = "daily";
+            example = "hourly";
+            description = ''
+              A systemd calendar expression for the scheduled refresh. The
+              list also refreshes after every registered generation, so the
+              schedule covers nixos-rebuild test, which registers none.
+            '';
+          };
+        };
+      };
+    };
+
     activeResponse = mkOption {
       description = ''
         Active response, which lets the manager tell this agent to act on a
@@ -1369,6 +1419,30 @@ in
     systemd.targets.multi-user.wants = [ "wazuh.target" ];
     systemd.targets.wazuh.wants = map (d: "${d}.service") daemons;
 
+    # The scheduled refresh of the Nix package list. The activation watch
+    # below is the usual trigger; this one covers a change it missed.
+    systemd.timers.wazuh-nix-inventory = mkIf cfg.packageInventory.enable {
+      description = "Refresh the Nix package list for the Wazuh agent";
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnCalendar = cfg.packageInventory.interval;
+        Persistent = true;
+        RandomizedDelaySec = "1h";
+      };
+    };
+
+    # The generation watch. nixos-rebuild switch and boot register each new
+    # generation as a link in /nix/var/nix/profiles, and a new entry in a
+    # watched directory is a PathChanged event on it. A watch on the
+    # /run/current-system link itself does not fire when the link is
+    # replaced, which checks.agent found. nixos-rebuild test registers no
+    # generation, so the timer above covers it.
+    systemd.paths.wazuh-nix-inventory = mkIf cfg.packageInventory.enable {
+      description = "Watch the system generations for the Wazuh package list";
+      wantedBy = [ "wazuh.target" ];
+      pathConfig.PathChanged = "/nix/var/nix/profiles";
+    };
+
     systemd.services = listToAttrs (map (d: nameValuePair d (mkService d)) daemons) // {
       wazuh-agent-auth = {
         description = "Enroll the Wazuh agent with its manager";
@@ -1458,6 +1532,67 @@ in
               + optionalString (identityFlags != "") " ${identityFlags}";
             ExecStartPost = "${markRegistered}";
           };
+      };
+
+      # Lists the runtime closure of the activated system for syscollector.
+      # The packageInventory option says why. Unprivileged on purpose: the
+      # query goes to the Nix daemon over its Unix socket, which any local
+      # user may open, and the daemon reads the store database. So the unit
+      # keeps the daemon sandbox, runs as the wazuh user, and loses the
+      # network as well.
+      wazuh-nix-inventory = mkIf cfg.packageInventory.enable {
+        description = "List the Nix packages of the running system for the Wazuh agent";
+        # The first list must exist before modulesd scans on start, or the
+        # first inventory the manager sees holds no packages until the next
+        # syscollector interval, an hour later.
+        after = [
+          "setup-pre-wazuh.service"
+          "nix-daemon.socket"
+        ];
+        wants = [ "setup-pre-wazuh.service" ];
+        before = [ "wazuh-modulesd.service" ];
+        wantedBy = [ "wazuh.target" ];
+        environment = {
+          # A query writes nothing, but nix resolves these at start, and the
+          # home of the wazuh user is read-only inside the sandbox.
+          XDG_CACHE_HOME = "${stateDir}/tmp";
+          XDG_STATE_HOME = "${stateDir}/tmp";
+        };
+        serviceConfig = hardening // {
+          Type = "oneshot";
+          User = wazuhUser;
+          Group = wazuhGroup;
+          WorkingDirectory = "${stateDir}/";
+          # The daemon socket is AF_UNIX, which PrivateNetwork keeps. Any
+          # request for an address fails loudly rather than reaching out.
+          PrivateNetwork = true;
+          ReadWritePaths = writableStateDirsFor "wazuh-nix-inventory";
+          NoExecPaths = noExecStateDirsFor "wazuh-nix-inventory";
+          ExecStart =
+            let
+              # The list is replaced by a rename, so syscollector never
+              # reads a half-written file. mode 0640 under the wazuh group
+              # matches the files beside it.
+              script = pkgs.writeShellApplication {
+                name = "wazuh-nix-inventory";
+                runtimeInputs = [
+                  config.nix.package
+                  pkgs.coreutils
+                ];
+                text = ''
+                  dir=${stateDir}/queue/syscollector
+                  install -d -m 0750 "$dir"
+                  tmp=$(mktemp "$dir/.nix-closure.XXXXXX")
+                  trap 'rm -f "$tmp"' EXIT
+                  nix-store --query --requisites /run/current-system > "$tmp"
+                  chmod 0640 "$tmp"
+                  mv -f "$tmp" "$dir/nix-closure"
+                  trap - EXIT
+                '';
+              };
+            in
+            "${script}/bin/wazuh-nix-inventory";
+        };
       };
 
       setup-pre-wazuh = {

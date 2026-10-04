@@ -1,0 +1,613 @@
+diff --git a/src/data_provider/src/packages/packageLinuxDataRetriever.h b/src/data_provider/src/packages/packageLinuxDataRetriever.h
+index 12e6c8fc24..63f88613a8 100644
+--- a/src/data_provider/src/packages/packageLinuxDataRetriever.h
++++ b/src/data_provider/src/packages/packageLinuxDataRetriever.h
+@@ -71,6 +71,13 @@ void getApkInfo(const std::string& libPath, std::function<void(nlohmann::json&)>
+  */
+ void getSnapInfo(std::function<void(nlohmann::json&)> callback);
+ 
++/**
++ * @brief Fills a JSON object with the packages in a NixOS system closure
++ * @param fileName Path to a file that lists the closure, one store path per line
++ * @param callback Callback to be called for every single element being found
++ */
++void getNixInfo(const std::string& fileName, std::function<void(nlohmann::json&)> callback);
++
+ // Exception template
+ template <LinuxType linuxType>
+ class FactoryPackagesCreator final
+@@ -116,6 +123,11 @@ class FactoryPackagesCreator<LinuxType::STANDARD> final
+             {
+                 getSnapInfo(callback);
+             }
++
++            if (Utils::existsRegular(NIX_CLOSURE_PATH))
++            {
++                getNixInfo(NIX_CLOSURE_PATH, callback);
++            }
+         }
+ 
+         static void getPythonPackages(std::unordered_set<std::string>& pythonPackages)
+diff --git a/src/data_provider/src/packages/packageLinuxNixParserHelper.h b/src/data_provider/src/packages/packageLinuxNixParserHelper.h
+new file mode 100644
+index 0000000000..f236dd6ddb
+--- /dev/null
++++ b/src/data_provider/src/packages/packageLinuxNixParserHelper.h
+@@ -0,0 +1,310 @@
++/*
++ * Wazuh SYSINFO
++ * Copyright (C) 2015, Wazuh Inc.
++ * October 04, 2026.
++ *
++ * This program is free software; you can redistribute it
++ * and/or modify it under the terms of the GNU General Public
++ * License (version 2) as published by the FSF - Free Software
++ * Foundation.
++ */
++
++#ifndef _PACKAGE_LINUX_NIX_PARSER_HELPER_H
++#define _PACKAGE_LINUX_NIX_PARSER_HELPER_H
++
++#include <algorithm>
++#include <array>
++#include <cctype>
++#include <map>
++#include <string>
++#include <string_view>
++#include <utility>
++#include "json.hpp"
++#include "sharedDefs.h"
++
++#pragma GCC diagnostic push
++#pragma GCC diagnostic ignored "-Wunused-function"
++
++namespace PackageLinuxHelper
++{
++    // A store path is <store>/<32 base-32 characters>-<name>. The hash
++    // length is fixed by Nix, so it is the anchor for the name.
++    constexpr auto NIX_STORE_HASH_LENGTH {32u};
++
++    // nixpkgs appends the output name to the store name of every output but
++    // the default one, so "openssl-3.0.14-bin" and "openssl-3.0.14-dev" are
++    // the same installed package as "openssl-3.0.14". An output name is a
++    // word, so every trailing "-<letters>" segment of the version is removed,
++    // repeatedly: "linux-6.18.44-modules-shrunk" reduces to "6.18.44".
++    // These words are version qualifiers rather than output names, and stay.
++    static const std::array<std::string_view, 10> s_nixPreReleaseWords
++    {
++        "alpha", "beta", "rc", "pre", "preview", "snapshot", "nightly",
++        "unstable", "git", "final"
++    };
++
++    // Store objects that are files rather than installed software. They
++    // carry no version that a vulnerability feed could match, and some of
++    // them, such as a kernel configuration, carry a version that is not
++    // theirs.
++    static const std::array<std::string_view, 36> s_nixSkippedExtensions
++    {
++        ".drv", ".tar.gz", ".tar.xz", ".tar.bz2", ".tar.zst", ".tgz", ".zip",
++        ".gz", ".xz", ".bz2", ".zst", ".patch", ".diff", ".conf", ".json",
++        ".toml", ".yaml", ".yml", ".xml", ".sh", ".py", ".pl", ".txt", ".pem",
++        ".crt", ".nix", ".rules", ".desktop", ".lock", ".service", ".socket",
++        ".timer", ".target", ".mount", ".path", ".whl"
++    };
++
++    // Store names that carry a version but are not a package. The NixOS
++    // system closure itself is the main one: its version is the nixpkgs
++    // revision, not a software version.
++    static const std::array<std::string_view, 2> s_nixSkippedPrefixes
++    {
++        "nixos-system-", "unit-"
++    };
++
++    // The names of Python packages from nixpkgs are "<interpreter>-<pypi
++    // name>". A few derivations under the same prefix are parts of the
++    // interpreter itself rather than PyPI packages.
++    static const std::array<std::string_view, 6> s_nixPythonNonPackages
++    {
++        "minimal", "full", "env", "debug", "tests", "wrapper"
++    };
++
++    // nixpkgs names that differ from the NVD product name for the same
++    // software. The manager looks vulnerability candidates up by product
++    // name, so a name that differs matches nothing.
++    static const std::map<std::string, std::string> s_nixProductNames
++    {
++        {"linux", "linux_kernel"},
++        {"bash-interactive", "bash"},
++        {"python3", "python"},
++        {"nodejs", "node.js"},
++    };
++
++    static bool nixEndsWith(const std::string_view value, const std::string_view suffix)
++    {
++        return value.size() >= suffix.size() &&
++               value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
++    }
++
++    // Nix's own rule, DrvName in libstore: the version starts at the first
++    // dash that is followed by a character that is not a letter. A name
++    // without such a dash has no version.
++    static std::pair<std::string, std::string> splitNixDrvName(const std::string& drvName)
++    {
++        for (size_t i = 0; i + 1 < drvName.size(); ++i)
++        {
++            const auto next = static_cast<unsigned char>(drvName[i + 1]);
++
++            if (drvName[i] == '-' && !std::isalpha(next))
++            {
++                return {drvName.substr(0, i), drvName.substr(i + 1)};
++            }
++        }
++
++        return {drvName, ""};
++    }
++
++    // Remove every trailing "-<output>" from a version, so the outputs of
++    // one package share one version string.
++    static std::string stripNixOutputSuffixes(std::string version)
++    {
++        bool stripped {true};
++
++        while (stripped)
++        {
++            stripped = false;
++            const auto dash = version.rfind('-');
++
++            if (dash != std::string::npos && dash > 0 && dash + 1 < version.size())
++            {
++                const std::string_view tail {version.data() + dash + 1, version.size() - dash - 1};
++                const auto isWord = std::all_of(tail.begin(), tail.end(), [](const char c)
++                {
++                    return std::isalpha(static_cast<unsigned char>(c)) != 0;
++                });
++                const auto isQualifier = std::find(s_nixPreReleaseWords.begin(), s_nixPreReleaseWords.end(), tail) !=
++                                         s_nixPreReleaseWords.end();
++
++                if (isWord && !isQualifier)
++                {
++                    version.erase(dash);
++                    stripped = true;
++                }
++            }
++        }
++
++        return version;
++    }
++
++    // "python3.13-requests" names the PyPI package "requests". The head is
++    // an interpreter name followed by digits and dots only.
++    static bool isNixPythonPackage(const std::string& name, std::string& pypiName)
++    {
++        const auto dash = name.find('-');
++
++        if (dash == std::string::npos)
++        {
++            return false;
++        }
++
++        const std::string_view head {name.data(), dash};
++        const std::string_view rest {name.data() + dash + 1, name.size() - dash - 1};
++        std::string_view digits;
++
++        if (head.compare(0, 6, "python") == 0)
++        {
++            digits = head.substr(6);
++        }
++        else if (head.compare(0, 4, "pypy") == 0)
++        {
++            digits = head.substr(4);
++        }
++        else
++        {
++            return false;
++        }
++
++        const auto onlyVersionChars = std::all_of(digits.begin(), digits.end(), [](const char c)
++        {
++            return std::isdigit(static_cast<unsigned char>(c)) || c == '.';
++        });
++
++        if (!onlyVersionChars || rest.empty())
++        {
++            return false;
++        }
++
++        if (std::find(s_nixPythonNonPackages.begin(), s_nixPythonNonPackages.end(), rest) !=
++                s_nixPythonNonPackages.end())
++        {
++            return false;
++        }
++
++        pypiName = std::string {rest};
++        return true;
++    }
++
++    /**
++     * @brief Turns one line of `nix-store --query --requisites` into a
++     *        package row.
++     *
++     * The line is a store path. Its name part follows the nixpkgs convention
++     * "<pname>-<version>[-<output>]", which is the only information the
++     * store carries about an installed package: no vendor, no description,
++     * no install time and no record of patches that nixpkgs applied.
++     *
++     * @param line         One store path, with or without surrounding
++     *                     whitespace.
++     * @param architecture The machine architecture to record. The store path
++     *                     does not carry it.
++     * @return The package row, or an empty object when the line is not a
++     *         versioned package.
++     */
++    static nlohmann::json parseNixStorePath(const std::string& line, const std::string& architecture)
++    {
++        nlohmann::json packageInfo;
++
++        const auto first = line.find_first_not_of(" \t\r\n");
++
++        if (first == std::string::npos)
++        {
++            return packageInfo;
++        }
++
++        const auto last = line.find_last_not_of(" \t\r\n");
++        const std::string storePath {line.substr(first, last - first + 1)};
++
++        const auto slash = storePath.rfind('/');
++
++        if (slash == std::string::npos || slash == 0)
++        {
++            return packageInfo;
++        }
++
++        const std::string storeName {storePath.substr(slash + 1)};
++
++        // <hash>-<name>, and the hash is base-32 without padding.
++        if (storeName.size() <= NIX_STORE_HASH_LENGTH + 1 || storeName[NIX_STORE_HASH_LENGTH] != '-')
++        {
++            return packageInfo;
++        }
++
++        const auto hashIsBase32 = std::all_of(storeName.begin(), storeName.begin() + NIX_STORE_HASH_LENGTH,
++                                              [](const char c)
++        {
++            return std::isdigit(static_cast<unsigned char>(c)) || std::islower(static_cast<unsigned char>(c));
++        });
++
++        if (!hashIsBase32)
++        {
++            return packageInfo;
++        }
++
++        const std::string drvName {storeName.substr(NIX_STORE_HASH_LENGTH + 1)};
++
++        for (const auto& extension : s_nixSkippedExtensions)
++        {
++            if (nixEndsWith(drvName, extension))
++            {
++                return packageInfo;
++            }
++        }
++
++        for (const auto& prefix : s_nixSkippedPrefixes)
++        {
++            if (drvName.compare(0, prefix.size(), prefix) == 0)
++            {
++                return packageInfo;
++            }
++        }
++
++        auto [name, version] = splitNixDrvName(drvName);
++        version = stripNixOutputSuffixes(version);
++
++        if (name.empty() || version.empty())
++        {
++            return packageInfo;
++        }
++
++        std::transform(name.begin(), name.end(), name.begin(), [](const unsigned char c)
++        {
++            return std::tolower(c);
++        });
++
++        std::string format {"nix"};
++        std::string pypiName;
++
++        if (isNixPythonPackage(name, pypiName))
++        {
++            name = pypiName;
++            format = "pypi";
++        }
++        else if (const auto product = s_nixProductNames.find(name); product != s_nixProductNames.end())
++        {
++            name = product->second;
++        }
++
++        packageInfo["name"] = name;
++        packageInfo["version"] = version;
++        packageInfo["format"] = format;
++        packageInfo["architecture"] = architecture;
++        packageInfo["location"] = storePath;
++        packageInfo["description"] = drvName;
++        packageInfo["source"] = "nixpkgs";
++        packageInfo["vendor"] = UNKNOWN_VALUE;
++        packageInfo["install_time"] = UNKNOWN_VALUE;
++        packageInfo["groups"] = UNKNOWN_VALUE;
++        packageInfo["priority"] = UNKNOWN_VALUE;
++        packageInfo["size"] = 0;
++        // The multiarch field won't have a default value
++
++        return packageInfo;
++    }
++}
++
++#pragma GCC diagnostic pop
++
++#endif // _PACKAGE_LINUX_NIX_PARSER_HELPER_H
+diff --git a/src/data_provider/src/packages/packageLinuxParserNix.cpp b/src/data_provider/src/packages/packageLinuxParserNix.cpp
+new file mode 100644
+index 0000000000..1e2cf12ab5
+--- /dev/null
++++ b/src/data_provider/src/packages/packageLinuxParserNix.cpp
+@@ -0,0 +1,68 @@
++/*
++ * Wazuh SYSINFO
++ * Copyright (C) 2015, Wazuh Inc.
++ * October 04, 2026.
++ *
++ * This program is free software; you can redistribute it
++ * and/or modify it under the terms of the GNU General Public
++ * License (version 2) as published by the FSF - Free Software
++ * Foundation.
++ */
++
++#include <fstream>
++#include <map>
++#include <string>
++#include <sys/utsname.h>
++#include "json.hpp"
++#include "packageLinuxNixParserHelper.h"
++
++void getNixInfo(const std::string& fileName, std::function<void(nlohmann::json&)> callback)
++{
++    std::ifstream closure(fileName);
++
++    if (!closure.is_open())
++    {
++        return;
++    }
++
++    struct utsname uts {};
++    const std::string architecture {uname(&uts) == 0 ? uts.machine : UNKNOWN_VALUE};
++
++    // One row per installed package, not per store path. A package with
++    // several outputs, or two builds of the same version, is listed once,
++    // and the shortest store path wins because it is the one without an
++    // output suffix.
++    std::map<std::string, nlohmann::json> packages;
++    std::string line;
++
++    while (std::getline(closure, line))
++    {
++        auto packageInfo = PackageLinuxHelper::parseNixStorePath(line, architecture);
++
++        if (packageInfo.empty())
++        {
++            continue;
++        }
++
++        const auto key = packageInfo.at("name").get<std::string>() + "|" +
++                         packageInfo.at("version").get<std::string>() + "|" +
++                         packageInfo.at("format").get<std::string>();
++
++        const auto it = packages.find(key);
++
++        if (it == packages.end())
++        {
++            packages.emplace(key, std::move(packageInfo));
++        }
++        else if (packageInfo.at("location").get<std::string>().size() <
++                 it->second.at("location").get<std::string>().size())
++        {
++            it->second = std::move(packageInfo);
++        }
++    }
++
++    for (auto& [key, packageInfo] : packages)
++    {
++        callback(packageInfo);
++    }
++}
+diff --git a/src/data_provider/src/sharedDefs.h b/src/data_provider/src/sharedDefs.h
+index d6c77b16f3..bd52781fa3 100644
+--- a/src/data_provider/src/sharedDefs.h
++++ b/src/data_provider/src/sharedDefs.h
+@@ -38,6 +38,11 @@ constexpr auto APK_PATH {"/lib/apk/db"};
+ constexpr auto APK_DB_PATH {"/lib/apk/db/installed"};
+ constexpr auto SNAP_PATH {"/var/lib/snapd"};
+ 
++// Written by the host, one store path per line, from
++// `nix-store --query --requisites /run/current-system`. Relative to the
++// agent home, like SYSCOLLECTOR_DB_DISK_PATH in headers/defs.h.
++constexpr auto NIX_CLOSURE_PATH {"queue/syscollector/nix-closure"};
++
+ constexpr auto UNKNOWN_VALUE {" "};
+ constexpr auto MAC_ADDRESS_COUNT_SEGMENTS
+ {
+diff --git a/src/data_provider/tests/sysInfoPackagesLinuxHelper/sysInfoPackagesLinuxHelper_test.cpp b/src/data_provider/tests/sysInfoPackagesLinuxHelper/sysInfoPackagesLinuxHelper_test.cpp
+index 00316067d2..600372edfb 100644
+--- a/src/data_provider/tests/sysInfoPackagesLinuxHelper/sysInfoPackagesLinuxHelper_test.cpp
++++ b/src/data_provider/tests/sysInfoPackagesLinuxHelper/sysInfoPackagesLinuxHelper_test.cpp
+@@ -15,6 +15,7 @@
+ #include "packages/packageLinuxRpmParserHelper.h"
+ #include "packages/packageLinuxRpmParserHelperLegacy.h"
+ #include "packages/packageLinuxApkParserHelper.h"
++#include "packages/packageLinuxNixParserHelper.h"
+ #include "packages/rpmPackageManager.h"
+ #include <alpm.h>
+ #include <package.h>
+@@ -745,3 +746,164 @@ TEST_F(SysInfoPackagesLinuxHelperTest, parseSnapWrongJSON)
+     });
+ }
+ 
++
++TEST_F(SysInfoPackagesLinuxHelperTest, parseNixStorePathPlainPackage)
++{
++    const auto& jsPackageInfo
++    {
++        PackageLinuxHelper::parseNixStorePath(
++            "/nix/store/di26b1kkbammy0sj70nq5qzvfrh78wxl-coreutils-9.11\n", "x86_64")
++    };
++    EXPECT_FALSE(jsPackageInfo.empty());
++    EXPECT_EQ("coreutils", jsPackageInfo.at("name"));
++    EXPECT_EQ("9.11", jsPackageInfo.at("version"));
++    EXPECT_EQ("nix", jsPackageInfo.at("format"));
++    EXPECT_EQ("x86_64", jsPackageInfo.at("architecture"));
++    EXPECT_EQ("/nix/store/di26b1kkbammy0sj70nq5qzvfrh78wxl-coreutils-9.11", jsPackageInfo.at("location"));
++    EXPECT_EQ("coreutils-9.11", jsPackageInfo.at("description"));
++    EXPECT_EQ("nixpkgs", jsPackageInfo.at("source"));
++    EXPECT_EQ(UNKNOWN_VALUE, jsPackageInfo.at("vendor"));
++    EXPECT_EQ(UNKNOWN_VALUE, jsPackageInfo.at("install_time"));
++    EXPECT_EQ(0, jsPackageInfo.at("size"));
++}
++
++TEST_F(SysInfoPackagesLinuxHelperTest, parseNixStorePathStripsOutputSuffixes)
++{
++    const auto& bin
++    {
++        PackageLinuxHelper::parseNixStorePath(
++            "/nix/store/61r7fpwz7hk9v7yn1h6jvrn0d5d7fl5c-curl-8.21.0-bin", "x86_64")
++    };
++    EXPECT_EQ("curl", bin.at("name"));
++    EXPECT_EQ("8.21.0", bin.at("version"));
++
++    const auto& modules
++    {
++        PackageLinuxHelper::parseNixStorePath(
++            "/nix/store/61r7fpwz7hk9v7yn1h6jvrn0d5d7fl5c-linux-6.18.44-modules-shrunk", "x86_64")
++    };
++    EXPECT_EQ("linux_kernel", modules.at("name"));
++    EXPECT_EQ("6.18.44", modules.at("version"));
++}
++
++TEST_F(SysInfoPackagesLinuxHelperTest, parseNixStorePathKeepsRevisionAndSnapshotVersions)
++{
++    const auto& glibc
++    {
++        PackageLinuxHelper::parseNixStorePath(
++            "/nix/store/61r7fpwz7hk9v7yn1h6jvrn0d5d7fl5c-glibc-2.40-66", "x86_64")
++    };
++    EXPECT_EQ("glibc", glibc.at("name"));
++    EXPECT_EQ("2.40-66", glibc.at("version"));
++
++    const auto& snapshot
++    {
++        PackageLinuxHelper::parseNixStorePath(
++            "/nix/store/61r7fpwz7hk9v7yn1h6jvrn0d5d7fl5c-foo-0-unstable-2025-03-01", "x86_64")
++    };
++    EXPECT_EQ("foo", snapshot.at("name"));
++    EXPECT_EQ("0-unstable-2025-03-01", snapshot.at("version"));
++
++    const auto& patchLevel
++    {
++        PackageLinuxHelper::parseNixStorePath(
++            "/nix/store/bwry105g7v5jspr41bx9x3fcfqsmfkq2-bash-interactive-5.3p15", "x86_64")
++    };
++    EXPECT_EQ("bash", patchLevel.at("name"));
++    EXPECT_EQ("5.3p15", patchLevel.at("version"));
++}
++
++TEST_F(SysInfoPackagesLinuxHelperTest, parseNixStorePathPythonPackages)
++{
++    const auto& requests
++    {
++        PackageLinuxHelper::parseNixStorePath(
++            "/nix/store/61r7fpwz7hk9v7yn1h6jvrn0d5d7fl5c-python3.13-requests-2.32.3", "x86_64")
++    };
++    EXPECT_EQ("requests", requests.at("name"));
++    EXPECT_EQ("2.32.3", requests.at("version"));
++    EXPECT_EQ("pypi", requests.at("format"));
++
++    const auto& dateutil
++    {
++        PackageLinuxHelper::parseNixStorePath(
++            "/nix/store/61r7fpwz7hk9v7yn1h6jvrn0d5d7fl5c-python3.13-python-dateutil-2.9.0", "x86_64")
++    };
++    EXPECT_EQ("python-dateutil", dateutil.at("name"));
++    EXPECT_EQ("pypi", dateutil.at("format"));
++
++    const auto& interpreter
++    {
++        PackageLinuxHelper::parseNixStorePath(
++            "/nix/store/61r7fpwz7hk9v7yn1h6jvrn0d5d7fl5c-python3-3.13.2", "x86_64")
++    };
++    EXPECT_EQ("python", interpreter.at("name"));
++    EXPECT_EQ("3.13.2", interpreter.at("version"));
++    EXPECT_EQ("nix", interpreter.at("format"));
++
++    const auto& minimal
++    {
++        PackageLinuxHelper::parseNixStorePath(
++            "/nix/store/61r7fpwz7hk9v7yn1h6jvrn0d5d7fl5c-python3-minimal-3.13.2", "x86_64")
++    };
++    EXPECT_EQ("python3-minimal", minimal.at("name"));
++    EXPECT_EQ("nix", minimal.at("format"));
++}
++
++TEST_F(SysInfoPackagesLinuxHelperTest, parseNixStorePathLowersCase)
++{
++    const auto& jsPackageInfo
++    {
++        PackageLinuxHelper::parseNixStorePath(
++            "/nix/store/61r7fpwz7hk9v7yn1h6jvrn0d5d7fl5c-ImageMagick-7.1.1-47", "aarch64")
++    };
++    EXPECT_EQ("imagemagick", jsPackageInfo.at("name"));
++    EXPECT_EQ("7.1.1-47", jsPackageInfo.at("version"));
++    EXPECT_EQ("ImageMagick-7.1.1-47", jsPackageInfo.at("description"));
++    EXPECT_EQ("aarch64", jsPackageInfo.at("architecture"));
++}
++
++TEST_F(SysInfoPackagesLinuxHelperTest, parseNixStorePathSkipsUnversionedObjects)
++{
++    for (const auto& line :
++            {
++                "/nix/store/90x91l8qfq8lc410fwnbb8yrr8yfj7wa-say",
++                "/nix/store/4i1knwmmbjiqmkx9q8iv50v49r8kb9vh-bash-norc",
++                "/nix/store/4i1knwmmbjiqmkx9q8iv50v49r8kb9vh-etc",
++                "/nix/store/4i1knwmmbjiqmkx9q8iv50v49r8kb9vh-system-path",
++                "/nix/store/4i1knwmmbjiqmkx9q8iv50v49r8kb9vh-unit-sshd.service",
++            })
++    {
++        EXPECT_TRUE(PackageLinuxHelper::parseNixStorePath(line, "x86_64").empty()) << line;
++    }
++}
++
++TEST_F(SysInfoPackagesLinuxHelperTest, parseNixStorePathSkipsFilesAndTheSystemClosure)
++{
++    for (const auto& line :
++            {
++                "/nix/store/4i1knwmmbjiqmkx9q8iv50v49r8kb9vh-foo-1.0.drv",
++                "/nix/store/4i1knwmmbjiqmkx9q8iv50v49r8kb9vh-foo-1.0.tar.gz",
++                "/nix/store/4i1knwmmbjiqmkx9q8iv50v49r8kb9vh-fontconfig-2.15.0.conf",
++                "/nix/store/4i1knwmmbjiqmkx9q8iv50v49r8kb9vh-nixos-system-host-25.05.20250901.abc1234",
++            })
++    {
++        EXPECT_TRUE(PackageLinuxHelper::parseNixStorePath(line, "x86_64").empty()) << line;
++    }
++}
++
++TEST_F(SysInfoPackagesLinuxHelperTest, parseNixStorePathRejectsLinesThatAreNotStorePaths)
++{
++    for (const auto& line :
++            {
++                "",
++                "   \n",
++                "garbage",
++                "/nix/store/abc-foo-1.0",
++                "/nix/store/4I1KNWMMBJIQMKX9Q8IV50V49R8KB9VH-foo-1.0",
++                "/nix/store/4i1knwmmbjiqmkx9q8iv50v49r8kb9vh",
++            })
++    {
++        EXPECT_TRUE(PackageLinuxHelper::parseNixStorePath(line, "x86_64").empty()) << line;
++    }
++}

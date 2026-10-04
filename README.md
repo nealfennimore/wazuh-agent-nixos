@@ -133,6 +133,8 @@ sudo systemctl restart wazuh.target
 | `labels` | `{ }` | Labels that the manager adds to every alert from this host. |
 | `logging.plain` | `true` | Writes the agent's own log as text, to `logs/ossec.log`. |
 | `logging.json` | `false` | Writes the agent's own log as JSON, to `logs/ossec.json`. |
+| `packageInventory.enable` | `config.nix.enable` | Lists the Nix packages of the running system for vulnerability detection. |
+| `packageInventory.interval` | `"daily"` | The scheduled refresh of that list. Each registered generation refreshes it too. |
 | `activeResponse.enable` | `false` | Lets the agent act on a finding, not only report it. |
 | `activeResponse.capability.<name>.enable` | see below | Whether that response is provisioned. |
 | `extraConfig` | `""` | XML appended to the generated `ossec.conf`. |
@@ -233,6 +235,66 @@ format as plain and hide the mistake.
 This log also reaches journald, because the daemons run in the foreground
 under systemd. Turn on `logging.json` when a collector reads the file
 directly and wants structured records.
+
+### Vulnerability detection
+
+The manager detects vulnerabilities from the package inventory that the
+agent sends. Upstream syscollector reads that inventory from the dpkg, rpm,
+pacman, apk and snap databases. NixOS has none of them, so a stock agent
+sends an empty inventory and the manager scans nothing. The manager also
+has no entry for the `nixos` platform, so it skips the operating system
+scan, and only says so at debug level 1.
+
+This module closes the package half. The `wazuh-nix-inventory` unit lists
+the runtime closure of the activated system:
+
+```bash
+nix-store --query --requisites /run/current-system
+```
+
+It writes the list to `/var/ossec/queue/syscollector/nix-closure`. Patch 06
+in `pkgs/patches` teaches syscollector to read that file. Each store path
+becomes one package row, named by the nixpkgs rule `pname-version`, with
+format `nix`. The manager has no `nix` format, so it falls back to a
+generic version parser and the NVD feed, which matches on package name.
+Python packages from nixpkgs are reported with format `pypi` instead, which
+routes them to the PyPI feed.
+
+The unit runs as the `wazuh` user with no network. The query is a
+conversation with the Nix daemon over its Unix socket, and the daemon
+answers from the local store database. It runs once before
+`wazuh-modulesd` starts, again after every generation that `nixos-rebuild
+switch` or `boot` registers, through a path unit
+on `/nix/var/nix/profiles`, and on the `packageInventory.interval`
+schedule. `nixos-rebuild test` registers no generation, so only the
+schedule covers it.
+
+To check the result on the agent:
+
+```bash
+sudo sqlite3 /var/ossec/queue/syscollector/db/local.db \
+  "select name, version, format from dbsync_packages where source = 'nixpkgs' limit 20"
+```
+
+To check the result on the manager, raise `wazuh_modules.debug` to 2 in
+`local_internal_options.conf` and read `ossec.log` for the agent's scan
+lines. They name each candidate and the reason it was accepted or
+rejected.
+
+Four limits remain:
+
+- The store path carries no vendor. An NVD entry that names a vendor
+  rejects a package without one. Entries for Homebrew packages, which
+  also carry no vendor, still match, so this is a minority of entries.
+- nixpkgs applies many fixes as patches without a version bump. Those
+  show as open findings. The same is true of every scanner that reads
+  only name and version.
+- A nixpkgs name that differs from the NVD product name matches nothing.
+  The collector renames the four most common cases, in
+  `packageLinuxNixParserHelper.h`. Add to that table when a package you
+  care about is missing.
+- There is no operating system entry. NixOS itself has no advisory feed
+  that the manager reads.
 
 ### Active response
 

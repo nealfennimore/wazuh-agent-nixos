@@ -41,9 +41,12 @@ pkgs.testers.runNixOSTest {
         "f /run/secrets/wazuh-authd-pass 0400 root root - test-enrollment-password"
       ];
 
-      # The journald subtest reads a counter out of the logcollector state
-      # file, which is JSON.
-      environment.systemPackages = [ pkgs.jq ];
+      # The journald subtest reads JSON, and the package inventory subtest
+      # reads the syscollector database.
+      environment.systemPackages = [
+        pkgs.jq
+        pkgs.sqlite
+      ];
     };
 
   # The same module with the opt-in settings on, so one run covers both sides
@@ -1102,5 +1105,89 @@ pkgs.testers.runNixOSTest {
         # reader with no error anywhere.
         agent.succeed("test -f /var/log/wtmp")
         agent.succeed("runuser -u wazuh -- test -r /var/log/wtmp")
+
+    with subtest("the Nix package list is written unprivileged, before modulesd"):
+        # The unit is a oneshot without RemainAfterExit, so wait for its
+        # product rather than its state. It runs before wazuh-modulesd, so
+        # the scan on start already sees the list.
+        closure = "/var/ossec/queue/syscollector/nix-closure"
+        agent.wait_for_file(closure, timeout=120)
+        agent.succeed(f"test $(stat -c %U:%G {closure}) = wazuh:wazuh")
+        agent.succeed(f"test $(stat -c %a {closure}) = 640")
+
+        # One store path per line, and the activated system is among them.
+        agent.succeed(f"grep -q '^/nix/store/' {closure}")
+        agent.fail(f"grep -vq '^/nix/store/' {closure}")
+        toplevel = agent.succeed("readlink -f /run/current-system").strip()
+        agent.succeed(f"grep -qxF '{toplevel}' {closure}")
+
+        # The query goes through the Nix daemon's Unix socket, so the unit
+        # needs neither root, nor a capability, nor a network.
+        unit = "wazuh-nix-inventory.service"
+        for prop, want in [
+            ("User", "wazuh"),
+            ("PrivateNetwork", "yes"),
+            ("ProtectSystem", "strict"),
+            ("NoNewPrivileges", "yes"),
+        ]:
+            got = agent.succeed(f"systemctl show -p {prop} --value {unit}").strip()
+            assert got == want, f"{unit}: {prop} is {got!r}, wanted {want!r}"
+        agent.succeed(f'test -z "$(systemctl show -p CapabilityBoundingSet --value {unit})"')
+
+        # Ordered before modulesd, and both triggers are armed.
+        after = agent.succeed("systemctl show -p After --value wazuh-modulesd.service")
+        assert unit in after.split(), f"modulesd does not wait for the list: {after!r}"
+        agent.succeed("systemctl is-active wazuh-nix-inventory.path")
+        agent.succeed("systemctl is-active wazuh-nix-inventory.timer")
+
+    with subtest("syscollector reports the Nix packages"):
+        # The collector only runs inside modulesd's package scan, so rows in
+        # the syscollector database prove the patch, the file, and the path
+        # from one into the other. modulesd holds the database open, so
+        # every read retries rather than trusting one attempt.
+        db = "/var/ossec/queue/syscollector/db/local.db"
+
+        def rows(where):
+            return (
+                "sqlite3 " + db
+                + " \"select count(*) from dbsync_packages where " + where + "\""
+            )
+
+        agent.wait_until_succeeds(
+            "test $(" + rows("format = 'nix'") + ") -gt 0", timeout=300
+        )
+        # Every row names its store path, and none lacks a version.
+        agent.wait_until_succeeds(
+            "test $("
+            + rows("source = 'nixpkgs' and location not like '/nix/store/%'")
+            + ") -eq 0",
+            timeout=60,
+        )
+        agent.wait_until_succeeds(
+            "test $(" + rows("source = 'nixpkgs' and version = '''") + ") -eq 0",
+            timeout=60,
+        )
+        # The kernel is in every system closure, and its nixpkgs name
+        # "linux" is translated to the NVD product name.
+        agent.wait_until_succeeds(
+            "test $(" + rows("name = 'linux_kernel' and format = 'nix'") + ") -gt 0",
+            timeout=60,
+        )
+
+    with subtest("a new generation refreshes the list"):
+        # nixos-rebuild switch and boot register the new system as a link in
+        # the profiles directory. Register the running system again under a
+        # spare number, so the system itself does not change, and the path
+        # unit must run the service again. A watch on the /run/current-system
+        # link itself does not fire when the link is replaced, so that is
+        # not what the module watches.
+        closure = "/var/ossec/queue/syscollector/nix-closure"
+        agent.succeed(f"rm {closure}")
+        agent.succeed(
+            "mkdir -p /nix/var/nix/profiles"
+            f" && ln -s {toplevel} /nix/var/nix/profiles/system-999-link"
+        )
+        agent.wait_for_file(closure, timeout=60)
+        agent.succeed(f"grep -qxF '{toplevel}' {closure}")
   '';
 }

@@ -23,7 +23,7 @@ first-class option and no entry in the generated file.
 | `syscheck` | Partially implemented |
 | `localfile` | Template default, adapted for journald |
 | `rootcheck` | Template default |
-| `wodle name="syscollector"` | Template default |
+| `wodle name="syscollector"` | Template default, plus a NixOS package collector |
 | `labels` | Implemented |
 | `logging` | Implemented |
 | `agent-upgrade` | Missing |
@@ -105,8 +105,11 @@ behind them.
 - `localfile` keeps the active-responses reader and the two command
   readers. The module replaces the three syslog file readers with one
   journald reader, because NixOS logs to journald.
-- `wodle name="syscollector"` runs hourly with hardware, OS and network
-  scans.
+- `wodle name="syscollector"` runs hourly with hardware, OS, network and
+  package scans. The package scan finds nothing on a stock NixOS host, so
+  patch 06 in `pkgs/patches` adds a collector that reads the system closure
+  that the `wazuh-nix-inventory` unit writes. The README section
+  "Vulnerability detection" describes it.
 
 The template also ships a disabled `wodle name="open-scap"` block. Upstream
 removed that module, so the block is dead configuration.
