@@ -595,8 +595,8 @@ To use the cache, add it to the host that builds the agent:
 
 ```nix
 nix.settings = {
-  substituters = [ "https://wazuh-agent-nixos.cachix.org" ];
-  trusted-public-keys = [ "wazuh-agent-nixos.cachix.org-1:<public key>" ];
+  substituters = [ "https://wazuh-agent.cachix.org" ];
+  trusted-public-keys = [ "wazuh-agent.cachix.org-1:KBpAGoK+2l+nz8OGVTaNRCZGIqjfWaTWwIvk9eNojRY=" ];
 };
 ```
 
