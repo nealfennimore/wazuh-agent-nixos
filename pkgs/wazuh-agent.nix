@@ -32,9 +32,9 @@
 let
   # Keep these three in step with the modules/wazuh submodule pin.
   # dependencyVersion mirrors DEPS_VERSION in src/Makefile at the same tag.
-  version = "4.14.7";
+  version = "4.14.8";
   dependencyVersion = "54";
-  wazuhRev = "a42268a27c555d9348d5598fb8751eaf4c8e9024";
+  wazuhRev = "f470ad7db717b18db7feeed568949643698f0f34";
 
   external_dependencies = import ./dependencies {
     inherit fetchurl lib dependencyVersion;
