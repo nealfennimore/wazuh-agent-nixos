@@ -78,7 +78,7 @@ let
     # derivation supplies it instead.
     modern_bpf_c = fetchurl {
       url = "https://raw.githubusercontent.com/wazuh/wazuh/v${version}/src/syscheckd/src/ebpf/src/modern.bpf.c";
-      hash = "sha256-zVqJXLW9tTxX0ncJAHVE2JIJDrRTAd2x7TA+DZ4hrWk=";
+      hash = "sha256-lxQZE8NHfnHYGIuLW873o7A57O9HCJOo3zW3OtX+qpI=";
     };
   };
 in
