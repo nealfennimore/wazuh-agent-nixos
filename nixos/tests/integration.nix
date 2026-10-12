@@ -61,7 +61,7 @@ let
           owner = "wazuh";
           repo = "wazuh";
           rev = "a42268a27c555d9348d5598fb8751eaf4c8e9024";
-          sha256 = "sha256-GILu5/EvaN4XeeUqiz6cAFNiZHw0yAGbLuyUBxPrLj0=";
+          sha256 = "sha256-CWzYmWHfJEsySJdL3ag/WxoQQRvJtTcmZDtOykmeWlo=";
         }
       }/tests/integration";
 

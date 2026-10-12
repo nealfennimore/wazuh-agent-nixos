@@ -55,7 +55,7 @@ let
         owner = "wazuh";
         repo = "wazuh";
         rev = wazuhRev;
-        sha256 = "sha256-GILu5/EvaN4XeeUqiz6cAFNiZHw0yAGbLuyUBxPrLj0=";
+        sha256 = "sha256-CWzYmWHfJEsySJdL3ag/WxoQQRvJtTcmZDtOykmeWlo=";
       };
 
   # rev mirrors HTTP_REQUEST_BRANCH in src/Makefile at the same tag.
